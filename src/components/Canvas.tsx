@@ -731,7 +731,13 @@ export const Canvas: React.FC = () => {
     if (state.palmRejection && e.pointerType === 'touch' && state.activeTool !== 'lasso') {
       touchCache.current.set(e.pointerId, e.nativeEvent);
       if (touchCache.current.size === 2) {
-        // Two fingers: start pinch
+        // Two fingers: start pinch — abort any active drawing stroke first
+        if (isDrawing.current && currentPoints.current.length >= 2) {
+          finishStroke();
+        } else if (isDrawing.current) {
+          isDrawing.current = false;
+          activePointerId.current = null;
+        }
         const pts = Array.from(touchCache.current.values());
         lastPinchDist.current = Math.hypot(
           pts[1].clientX - pts[0].clientX,
@@ -748,6 +754,11 @@ export const Canvas: React.FC = () => {
         lastPanPos.current = { x: e.clientX, y: e.clientY };
       }
       return;
+    }
+    // Non-touch (pen/mouse): clear any stale touch pan state so it doesn't
+    // interfere with the pointer-move handler for drawing.
+    if (e.pointerType !== 'touch') {
+      isPanning.current = false;
     }
 
     // Check if clicking on an image for manipulation
@@ -799,11 +810,19 @@ export const Canvas: React.FC = () => {
     }
 
     // Normal drawing
+    // If a different pointer is already drawing, ignore this new one.
+    // If the SAME pointer fires down again (shouldn't happen but guards against it), finish first.
     if (isDrawing.current) {
       if (activePointerId.current !== null && activePointerId.current !== e.pointerId) {
         return;
       }
       finishStroke();
+    }
+    // Guard: if activePointerId is stale from image manipulation that ended without
+    // properly clearing it, reset now so drawing can start cleanly.
+    if (!isDrawing.current && imageManip.current === null && activePointerId.current !== null
+        && activePointerId.current !== e.pointerId) {
+      activePointerId.current = null;
     }
 
     isDrawing.current = true;
@@ -1143,12 +1162,21 @@ export const Canvas: React.FC = () => {
       isPanning.current = false;
       lastPanPos.current = null;
     }
+    // Clean up image manipulation
     if (imageManip.current && e.pointerId === activePointerId.current) {
       imageManip.current = null;
       activePointerId.current = null;
       return;
     }
     if (e.pointerId === activePointerId.current) {
+      // Bug fix: if we have enough points, SAVE the stroke instead of discarding it.
+      // pointercancel fires when the OS interrupts (palm contact, system gestures, etc.)
+      // — the user DID draw those points and expects them to be committed.
+      if (isDrawing.current && currentPoints.current.length >= 2) {
+        finishStroke();
+        return;
+      }
+      // Not enough points — just clean up
       isDrawing.current = false;
       activePointerId.current = null;
       predictedPoint.current = null;
@@ -1166,7 +1194,7 @@ export const Canvas: React.FC = () => {
         }
       }
     }
-  }, []);
+  }, [finishStroke]);
 
   // ─── Ruler overlay ─────────────────────────────────────────
 
