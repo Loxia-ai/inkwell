@@ -570,7 +570,7 @@ export class StrokeRenderer {
 
   private static renderShape(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
     if (!stroke.shapeData) return;
-    const { type, points: shapePoints } = stroke.shapeData;
+    const shape = stroke.shapeData;
     const style = stroke.style;
 
     ctx.save();
@@ -580,45 +580,44 @@ export class StrokeRenderer {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    if (type === 'line') {
+    if (shape.type === 'line') {
       ctx.beginPath();
-      ctx.moveTo(shapePoints[0], shapePoints[1]);
-      ctx.lineTo(shapePoints[2], shapePoints[3]);
+      ctx.moveTo(shape.startX, shape.startY);
+      ctx.lineTo(shape.endX, shape.endY);
       ctx.stroke();
-    } else if (type === 'circle') {
-      const cx = shapePoints[0];
-      const cy = shapePoints[1];
-      const rx = shapePoints[2];
-      const ry = shapePoints[3];
+    } else if (shape.type === 'circle') {
+      const cx = shape.cx ?? (shape.startX + shape.endX) / 2;
+      const cy = shape.cy ?? (shape.startY + shape.endY) / 2;
+      const rx = Math.abs(shape.endX - shape.startX) / 2;
+      const ry = Math.abs(shape.endY - shape.startY) / 2;
       ctx.beginPath();
-      ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2);
+      ctx.ellipse(cx, cy, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2);
       ctx.stroke();
-    } else if (type === 'rectangle') {
-      const x = shapePoints[0];
-      const y = shapePoints[1];
-      const w = shapePoints[2];
-      const h = shapePoints[3];
+    } else if (shape.type === 'rectangle') {
+      const x = Math.min(shape.startX, shape.endX);
+      const y = Math.min(shape.startY, shape.endY);
+      const w = Math.abs(shape.endX - shape.startX);
+      const h = Math.abs(shape.endY - shape.startY);
       ctx.strokeRect(x, y, w, h);
-    } else if (type === 'arrow') {
-      const [x1, y1, x2, y2] = shapePoints;
+    } else if (shape.type === 'arrow') {
       ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
+      ctx.moveTo(shape.startX, shape.startY);
+      ctx.lineTo(shape.endX, shape.endY);
       ctx.stroke();
 
       // Arrowhead
-      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const angle = Math.atan2(shape.endY - shape.startY, shape.endX - shape.startX);
       const headLen = 15;
       ctx.beginPath();
-      ctx.moveTo(x2, y2);
+      ctx.moveTo(shape.endX, shape.endY);
       ctx.lineTo(
-        x2 - headLen * Math.cos(angle - Math.PI / 6),
-        y2 - headLen * Math.sin(angle - Math.PI / 6)
+        shape.endX - headLen * Math.cos(angle - Math.PI / 6),
+        shape.endY - headLen * Math.sin(angle - Math.PI / 6)
       );
-      ctx.moveTo(x2, y2);
+      ctx.moveTo(shape.endX, shape.endY);
       ctx.lineTo(
-        x2 - headLen * Math.cos(angle + Math.PI / 6),
-        y2 - headLen * Math.sin(angle + Math.PI / 6)
+        shape.endX - headLen * Math.cos(angle + Math.PI / 6),
+        shape.endY - headLen * Math.sin(angle + Math.PI / 6)
       );
       ctx.stroke();
     }
