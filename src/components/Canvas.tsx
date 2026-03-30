@@ -134,8 +134,8 @@ export const Canvas: React.FC = () => {
     if (!canvas) return { x: px, y: py };
     const rect = canvas.getBoundingClientRect();
     const rulerCanvasX = (rx - rect.left - t.offsetX) / t.scale;
-    // Ruler origin is at left edge, vertically centered (height=48, so +24)
-    const rulerCanvasY = (ry + 24 - rect.top - t.offsetY) / t.scale;
+    // Ruler bottom edge — strokes draw along the lower edge like a physical ruler
+    const rulerCanvasY = (ry + 48 - rect.top - t.offsetY) / t.scale;
 
     // Direction vector of the ruler line
     const rad = (angle * Math.PI) / 180;
