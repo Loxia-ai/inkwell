@@ -583,12 +583,16 @@ export const Canvas: React.FC = () => {
 
     if (points.length === 0) return;
 
+    // Clear overlay using physical pixel dimensions (not CSS px — they differ on Retina)
     const overlay = overlayRef.current;
     if (overlay) {
       const octx = overlay.getContext('2d');
       if (octx) {
-        const rect = overlay.getBoundingClientRect();
-        octx.clearRect(0, 0, rect.width, rect.height);
+        octx.setTransform(1, 0, 0, 1, 0, 0);
+        octx.clearRect(0, 0, overlay.width, overlay.height);
+        // Restore DPR scale for any subsequent drawing
+        const dpr = window.devicePixelRatio || 2;
+        octx.setTransform(dpr, 0, 0, dpr, 0, 0);
       }
     }
 
@@ -837,20 +841,20 @@ export const Canvas: React.FC = () => {
     }
 
     // Normal drawing
-    // If a different pointer is already drawing, ignore this new one.
-    // If the SAME pointer fires down again (shouldn't happen but guards against it), finish first.
+    // If a stroke is in progress when a new pointerDown arrives, ALWAYS finish it
+    // and start the new stroke. Do NOT check pointer IDs here.
+    //
+    // Rationale: On iPad with fast writing, the OS can assign a new pointer ID
+    // for the second stroke before the first pointerUp arrives. The old guard
+    // `if (activePointerId !== e.pointerId) return` was blocking these strokes.
+    // Touch events are already filtered by palm rejection above, so we never
+    // reach this code for touch — only pen and mouse, which are always 1 active
+    // pointer at a time.
     if (isDrawing.current) {
-      if (activePointerId.current !== null && activePointerId.current !== e.pointerId) {
-        return;
-      }
       finishStroke();
     }
-    // Guard: if activePointerId is stale from image manipulation that ended without
-    // properly clearing it, reset now so drawing can start cleanly.
-    if (!isDrawing.current && imageManip.current === null && activePointerId.current !== null
-        && activePointerId.current !== e.pointerId) {
-      activePointerId.current = null;
-    }
+    // Clear any stale activePointerId (e.g. from image manipulation)
+    activePointerId.current = null;
 
     isDrawing.current = true;
     activePointerId.current = e.pointerId;
@@ -1177,8 +1181,15 @@ export const Canvas: React.FC = () => {
       return;
     }
 
-    if (!isDrawing.current || e.pointerId !== activePointerId.current) return;
-    finishStroke();
+    // Finish if this is our active pointer OR if it's a stale up from the
+    // previous stroke (fast writing: old UP arrives after new DOWN already started).
+    // In the stale case, isDrawing is true but for the NEW pointer — don't finish.
+    if (!isDrawing.current) return;
+    if (e.pointerId === activePointerId.current) {
+      finishStroke();
+    }
+    // If e.pointerId !== activePointerId, this is a stale UP from the previous
+    // stroke — the new stroke is already running, so we correctly ignore it.
   }, [finishStroke, getActiveNotebook, persistNotebook]);
 
   const handlePointerCancel = useCallback((e: React.PointerEvent) => {

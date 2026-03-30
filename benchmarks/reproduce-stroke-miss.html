@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stroke Miss Reproduction</title>
+<style>
+  body { margin: 0; background: #1a1a1a; color: #fff; font-family: monospace; display: flex; gap: 16px; padding: 16px; }
+  canvas { background: #fafaf8; border: 2px solid #444; touch-action: none; cursor: crosshair; }
+  #log { width: 380px; height: 600px; overflow-y: auto; background: #111; padding: 12px; font-size: 11px; border: 1px solid #333; }
+  .ok  { color: #4ade80; }
+  .err { color: #f87171; }
+  .info { color: #60a5fa; }
+  .warn { color: #fbbf24; }
+  button { background: #374151; color: #fff; border: 1px solid #555; padding: 6px 12px; cursor: pointer; margin: 4px; font-size: 12px; }
+  button:hover { background: #4b5563; }
+  #stats { font-size: 13px; margin-top: 8px; }
+  .miss { background: rgba(248,113,113,0.15); }
+</style>
+</head>
+<body>
+
+<div>
+  <canvas id="c" width="600" height="600"></canvas>
+  <div id="stats">Strokes committed: <b id="committed">0</b> | Missed: <b id="missed">0</b></div>
+  <div style="margin-top:8px">
+    <button onclick="runAutoTest(50)">Auto-test: 50ms gap</button>
+    <button onclick="runAutoTest(20)">Auto-test: 20ms gap</button>
+    <button onclick="runAutoTest(10)">Auto-test: 10ms gap</button>
+    <button onclick="runAutoTest(5)">Auto-test: 5ms gap</button>
+    <button onclick="runAutoTest(2)">Auto-test: 2ms gap</button>
+    <button onclick="clearAll()">Clear</button>
+  </div>
+  <div style="margin-top:8px;font-size:11px;color:#9ca3af">
+    Draw manually or click Auto-test buttons.<br>
+    Auto-test simulates N letters drawn with X ms between strokes.
+  </div>
+</div>
+
+<div id="log"><div class="info">Ready. Draw or click Auto-test.</div></div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const log = document.getElementById('log');
+const committedEl = document.getElementById('committed');
+const missedEl = document.getElementById('missed');
+
+let totalCommitted = 0;
+let totalMissed = 0;
+let expectedStrokes = 0;
+let testRunning = false;
+
+// ─── Logging ──────────────────────────────────────────────────────
+function addLog(msg, cls='info') {
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = `[${performance.now().toFixed(1)}ms] ${msg}`;
+  if (cls === 'err' || cls === 'miss') d.className += ' miss';
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+
+// ─── State machine (mirrors Canvas.tsx logic exactly) ─────────────
+let isDrawing = false;
+let activePointerId = null;
+let currentPoints = [];
+let rafId = 0;
+let needsLiveRender = false;
+let strokeCount = 0;
+
+function finishStroke() {
+  if (!isDrawing) return;
+  isDrawing = false;
+  activePointerId = null;
+
+  if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+  needsLiveRender = false;
+
+  // SNAPSHOT immediately (the fix)
+  const points = [...currentPoints];
+  currentPoints = [];
+
+  if (points.length === 0) {
+    addLog('finishStroke: 0 points — stroke LOST', 'err');
+    totalMissed++;
+    missedEl.textContent = totalMissed;
+    return;
+  }
+
+  // Commit stroke
+  strokeCount++;
+  totalCommitted++;
+  committedEl.textContent = totalCommitted;
+  addLog(`Stroke #${strokeCount} committed: ${points.length} pts, first=(${points[0].x.toFixed(0)},${points[0].y.toFixed(0)})`, 'ok');
+
+  // Draw to canvas
+  ctx.save();
+  ctx.strokeStyle = `hsl(${(strokeCount * 47) % 360}, 70%, 50%)`;
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+  ctx.stroke();
+  ctx.restore();
+
+  // Check against expected
+  if (testRunning && totalCommitted + totalMissed >= expectedStrokes) {
+    const rate = ((totalCommitted / expectedStrokes) * 100).toFixed(1);
+    addLog(`=== Test done: ${totalCommitted}/${expectedStrokes} committed (${rate}%) ===`,
+      totalMissed === 0 ? 'ok' : 'err');
+    testRunning = false;
+  }
+}
+
+function handlePointerDown(e) {
+  if (isDrawing) {
+    if (activePointerId !== null && activePointerId !== e.pointerId) return;
+    finishStroke();
+  }
+  isDrawing = true;
+  activePointerId = e.pointerId;
+  currentPoints = [];
+
+  const rect = canvas.getBoundingClientRect();
+  currentPoints.push({ x: e.clientX - rect.left, y: e.clientY - rect.top, pressure: e.pressure || 0.5 });
+  addLog(`pointerDown id=${e.pointerId} type=${e.pointerType} at (${(e.clientX-rect.left).toFixed(0)},${(e.clientY-rect.top).toFixed(0)})`, 'info');
+  canvas.setPointerCapture(e.pointerId);
+}
+
+function handlePointerMove(e) {
+  if (!isDrawing || e.pointerId !== activePointerId) return;
+  const rect = canvas.getBoundingClientRect();
+  const coalesced = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  for (const ce of coalesced) {
+    currentPoints.push({ x: ce.clientX - rect.left, y: ce.clientY - rect.top, pressure: ce.pressure || 0.5 });
+  }
+  needsLiveRender = true;
+  if (!rafId) {
+    rafId = requestAnimationFrame(() => {
+      rafId = 0;
+      if (!needsLiveRender) return;
+      needsLiveRender = false;
+      // Live render (simplified — just draw last segment)
+      if (currentPoints.length >= 2) {
+        const p1 = currentPoints[currentPoints.length - 2];
+        const p2 = currentPoints[currentPoints.length - 1];
+        ctx.save();
+        ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+        ctx.restore();
+      }
+    });
+  }
+}
+
+function handlePointerUp(e) {
+  if (!isDrawing || e.pointerId !== activePointerId) return;
+  finishStroke();
+}
+
+function handlePointerCancel(e) {
+  if (e.pointerId === activePointerId) {
+    if (isDrawing && currentPoints.length >= 2) {
+      addLog(`pointerCancel — saving ${currentPoints.length} pts`, 'warn');
+      finishStroke();
+    } else {
+      isDrawing = false;
+      activePointerId = null;
+      currentPoints = [];
+      addLog('pointerCancel — discarded (< 2pts)', 'warn');
+    }
+  }
+}
+
+canvas.addEventListener('pointerdown', handlePointerDown);
+canvas.addEventListener('pointermove', handlePointerMove);
+canvas.addEventListener('pointerup', handlePointerUp);
+canvas.addEventListener('pointercancel', handlePointerCancel);
+
+// ─── Automated test: simulate N letters at speed X ────────────────
+// Each "letter" = pointerDown, N moves, pointerUp
+// Gap between letters = X ms (simulating fast writing)
+async function runAutoTest(gapMs) {
+  clearAll();
+  testRunning = true;
+  const NUM_LETTERS = 10;
+  expectedStrokes = NUM_LETTERS;
+  addLog(`=== Auto-test: ${NUM_LETTERS} letters, ${gapMs}ms gap ===`, 'info');
+
+  const rect = canvas.getBoundingClientRect();
+  const baseX = 50;
+  const baseY = 300;
+  const letterWidth = 50;
+
+  function makeEvent(type, x, y, pointerId = 1) {
+    return new PointerEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      clientX: rect.left + x,
+      clientY: rect.top + y,
+      pointerId,
+      pointerType: 'pen',
+      pressure: 0.5,
+      isPrimary: true,
+    });
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  for (let i = 0; i < NUM_LETTERS; i++) {
+    const lx = baseX + i * letterWidth;
+
+    // Simulate drawing a letter: down, 5 moves, up
+    canvas.dispatchEvent(makeEvent('pointerdown', lx, baseY - 20));
+    await sleep(2); // small delay between events within a stroke
+    canvas.dispatchEvent(makeEvent('pointermove', lx + 5, baseY - 10));
+    canvas.dispatchEvent(makeEvent('pointermove', lx + 10, baseY));
+    canvas.dispatchEvent(makeEvent('pointermove', lx + 15, baseY - 10));
+    canvas.dispatchEvent(makeEvent('pointermove', lx + 20, baseY - 20));
+    await sleep(2);
+    canvas.dispatchEvent(makeEvent('pointerup', lx + 20, baseY - 20));
+
+    // Gap between letters (this is where the miss happens)
+    addLog(`  Letter ${i+1}: up, waiting ${gapMs}ms...`, 'info');
+    await sleep(gapMs);
+  }
+
+  // Wait for any pending RAF
+  await sleep(100);
+  if (testRunning) {
+    addLog(`=== Test ended: ${totalCommitted}/${expectedStrokes} committed ===`,
+      totalMissed === 0 ? 'ok' : 'err');
+    testRunning = false;
+  }
+}
+
+function clearAll() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  strokeCount = 0;
+  totalCommitted = 0;
+  totalMissed = 0;
+  expectedStrokes = 0;
+  isDrawing = false;
+  activePointerId = null;
+  currentPoints = [];
+  if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+  committedEl.textContent = '0';
+  missedEl.textContent = '0';
+  log.innerHTML = '<div class="info">Cleared.</div>';
+}
+</script>
+</body>
+</html>
