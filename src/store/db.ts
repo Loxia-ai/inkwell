@@ -55,11 +55,12 @@ export function createNotebook(title: string = 'Untitled Notebook'): Notebook {
   };
 }
 
-export function createNotebookFromTemplate(template: NotebookTemplate, title?: string): Notebook {
+export function createNotebookFromTemplate(template: NotebookTemplate, title?: string, coverImage?: string): Notebook {
   return {
     id: uuid(),
     title: title || template.name,
     coverColor: template.coverColor,
+    coverImage: coverImage || template.coverImage,
     pages: [createBlankPage(template.width, template.height, template.background)],
     templateId: template.id,
     createdAt: Date.now(),

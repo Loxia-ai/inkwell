@@ -127,6 +127,27 @@ canvas {
   margin-bottom: 24px;
 }
 
+.welcome-illustration {
+  width: 240px;
+  max-width: 70%;
+  height: auto;
+  margin-bottom: 16px;
+  opacity: 0.92;
+  filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.08));
+  animation: floatIn 0.6s ease-out;
+}
+
+@keyframes floatIn {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.95);
+  }
+  to {
+    opacity: 0.92;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .welcome h1 {
   font-size: 34px;
   font-weight: 700;

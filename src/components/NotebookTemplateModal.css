@@ -48,12 +48,25 @@
   padding: 20px 24px 12px;
 }
 
+.template-header-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .template-header h2 {
   font-size: 22px;
   font-weight: 700;
   color: #1C1C1E;
   letter-spacing: -0.4px;
   margin: 0;
+}
+
+.template-header-subtitle {
+  font-size: 13px;
+  color: #8E8E93;
+  margin: 0;
+  font-weight: 400;
 }
 
 .template-close {
@@ -161,11 +174,210 @@
   align-items: center;
   justify-content: center;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+  position: relative;
+  background: #FAFAFA;
 }
 
 .template-icon {
   font-size: 24px;
   padding: 12px 0;
+  position: relative;
+  z-index: 1;
+}
+
+/* ─── CSS Pattern Backgrounds for Template Previews ─────────── */
+
+.template-bg-blank {
+  background: #FAFAFA;
+}
+
+.template-bg-lined {
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent 19px,
+    #B8D4E8 19px,
+    #B8D4E8 20px
+  );
+  background-color: #FAFAF5;
+}
+
+.template-bg-grid {
+  background:
+    repeating-linear-gradient(
+      to right,
+      transparent,
+      transparent 19px,
+      #D0D0D0 19px,
+      #D0D0D0 20px
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      transparent,
+      transparent 19px,
+      #D0D0D0 19px,
+      #D0D0D0 20px
+    );
+  background-color: #FAFAFA;
+}
+
+.template-bg-dotted {
+  background: radial-gradient(circle, #AAAAAA 1px, transparent 1px);
+  background-size: 12px 12px;
+  background-color: #FAFAFA;
+}
+
+.template-bg-graph {
+  background:
+    repeating-linear-gradient(
+      to right,
+      transparent,
+      transparent 9px,
+      #E0E0E0 9px,
+      #E0E0E0 10px
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      transparent,
+      transparent 9px,
+      #E0E0E0 9px,
+      #E0E0E0 10px
+    ),
+    repeating-linear-gradient(
+      to right,
+      transparent,
+      transparent 49px,
+      #C0C0C0 49px,
+      #C0C0C0 50px
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      transparent,
+      transparent 49px,
+      #C0C0C0 49px,
+      #C0C0C0 50px
+    );
+  background-color: #FAFAFA;
+}
+
+.template-bg-cornell {
+  background:
+    linear-gradient(to right, transparent 29%, #CC4444 29%, #CC4444 30%, transparent 30%),
+    linear-gradient(to bottom, transparent 79%, #CC4444 79%, #CC4444 80%, transparent 80%),
+    repeating-linear-gradient(
+      to bottom,
+      transparent,
+      transparent 19px,
+      #B8D4E8 19px,
+      #B8D4E8 20px
+    );
+  background-color: #FAFAF5;
+}
+
+.template-bg-isometric {
+  background:
+    linear-gradient(30deg, #D8D8D8 12%, transparent 12.5%, transparent 87%, #D8D8D8 87.5%, #D8D8D8),
+    linear-gradient(150deg, #D8D8D8 12%, transparent 12.5%, transparent 87%, #D8D8D8 87.5%, #D8D8D8),
+    linear-gradient(30deg, #D8D8D8 12%, transparent 12.5%, transparent 87%, #D8D8D8 87.5%, #D8D8D8),
+    linear-gradient(150deg, #D8D8D8 12%, transparent 12.5%, transparent 87%, #D8D8D8 87.5%, #D8D8D8),
+    linear-gradient(60deg, #E0E0E0 25%, transparent 25.5%, transparent 75%, #E0E0E0 75%, #E0E0E0),
+    linear-gradient(60deg, #E0E0E0 25%, transparent 25.5%, transparent 75%, #E0E0E0 75%, #E0E0E0);
+  background-size: 20px 35px;
+  background-position: 0 0, 0 0, 10px 18px, 10px 18px, 0 0, 10px 18px;
+  background-color: #FAFAFA;
+}
+
+.template-bg-music {
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 5px,
+    #333 5px,
+    #333 6px,
+    transparent 6px,
+    transparent 11px,
+    #333 11px,
+    #333 12px,
+    transparent 12px,
+    transparent 17px,
+    #333 17px,
+    #333 18px,
+    transparent 18px,
+    transparent 23px,
+    #333 23px,
+    #333 24px,
+    transparent 24px,
+    transparent 29px,
+    #333 29px,
+    #333 30px,
+    transparent 30px,
+    transparent 44px
+  );
+  background-color: #FAFAF5;
+}
+
+/* ─── Cover Picker ──────────────────────────────────────────── */
+
+.cover-picker-section {
+  margin-top: 8px;
+  padding-bottom: 16px;
+}
+
+.cover-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 10px;
+}
+
+.cover-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  background: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cover-option:active {
+  transform: scale(0.95);
+}
+
+.cover-option.selected {
+  border-color: #007AFF;
+  background: rgba(0, 122, 255, 0.05);
+}
+
+.cover-preview {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+}
+
+.cover-solid {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cover-solid::after {
+  content: '';
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.cover-label {
+  font-size: 10px;
+  color: #8E8E93;
+  font-weight: 500;
 }
 
 .template-name {
@@ -233,5 +445,9 @@
 
   .template-grid {
     grid-template-columns: repeat(3, 1fr);
+  }
+
+  .cover-picker-grid {
+    grid-template-columns: repeat(4, 1fr);
   }
 }

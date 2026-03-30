@@ -130,12 +130,19 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose, onNewNotebook
                 className={`notebook-card ${state.activeNotebookId === nb.id ? 'active' : ''}`}
                 onClick={() => handleSelectNotebook(nb.id)}
               >
-                <div className="notebook-cover" style={{ backgroundColor: nb.coverColor }}>
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="white" opacity="0.8">
-                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" fill="none" stroke="white" strokeWidth="1.5" />
-                  </svg>
-                </div>
+                <div className="notebook-cover" style={{
+                    backgroundColor: nb.coverColor,
+                    backgroundImage: nb.coverImage ? `url(${nb.coverImage})` : undefined,
+                    backgroundSize: 'cover',
+                    backgroundPosition: 'center',
+                  }}>
+                    {!nb.coverImage && (
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="white" opacity="0.8">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" fill="none" stroke="white" strokeWidth="1.5" />
+                      </svg>
+                    )}
+                  </div>
                 <div className="notebook-info">
                   {editingId === nb.id ? (
                     <input

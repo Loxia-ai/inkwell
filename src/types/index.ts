@@ -108,12 +108,14 @@ export interface NotebookTemplate {
   height: number;
   background: PageBackground;
   coverColor: string;
+  coverImage?: string;
 }
 
 export interface Notebook {
   id: string;
   title: string;
   coverColor: string;
+  coverImage?: string;
   pages: Page[];
   templateId?: string;
   createdAt: number;

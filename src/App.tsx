@@ -55,17 +55,11 @@ const AppContent: React.FC = () => {
           <Canvas />
         ) : (
           <div className="welcome">
-            <svg className="welcome-icon" viewBox="0 0 80 80" fill="none">
-              <rect width="80" height="80" rx="18" fill="url(#grad)" />
-              <defs>
-                <linearGradient id="grad" x1="0" y1="0" x2="80" y2="80">
-                  <stop offset="0%" stopColor="#007AFF" />
-                  <stop offset="100%" stopColor="#5856D6" />
-                </linearGradient>
-              </defs>
-              <path d="M25 55 L40 20 L42 20 L35 55 Z" fill="white" opacity="0.9" />
-              <path d="M38 55 L53 20 L55 20 L48 55 Z" fill="white" opacity="0.7" />
-            </svg>
+            <img
+              src="/illustrations/empty-state.png"
+              alt="Open notebook"
+              className="welcome-illustration"
+            />
             <h1>Inkwell</h1>
             <p>A beautiful notebook for your iPad. Write, sketch, and create with precision.</p>
             <button className="welcome-btn" onClick={handleNewNotebook}>
