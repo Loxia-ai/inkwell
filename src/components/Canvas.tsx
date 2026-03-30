@@ -430,8 +430,29 @@ export const Canvas: React.FC = () => {
 
   // ─── Resize handling ───────────────────────────────────────
 
+  // Initialize overlay canvas to correct physical pixel size.
+  // This must happen on mount and on resize — NOT on every pointerDown.
+  // Setting canvas.width/height resets the 2D context transform, so doing
+  // it on every stroke start was causing the fast letter-to-letter miss.
+  const initOverlay = useCallback(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const dpr = window.devicePixelRatio || 2;
+    const rect = overlay.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    // Only resize if dimensions actually changed (avoids unnecessary context reset)
+    const targetW = Math.round(rect.width * dpr);
+    const targetH = Math.round(rect.height * dpr);
+    if (overlay.width !== targetW || overlay.height !== targetH) {
+      overlay.width = targetW;
+      overlay.height = targetH;
+    }
+  }, []);
+
   useEffect(() => {
-    const handleResize = () => { redrawAll(); };
+    const handleResize = () => { initOverlay(); redrawAll(); };
+    // Initialize immediately on mount
+    initOverlay();
     window.addEventListener('resize', handleResize);
     const ro = new ResizeObserver(handleResize);
     if (containerRef.current) ro.observe(containerRef.current);
@@ -439,7 +460,7 @@ export const Canvas: React.FC = () => {
       window.removeEventListener('resize', handleResize);
       ro.disconnect();
     };
-  }, [redrawAll]);
+  }, [redrawAll, initOverlay]);
 
   useEffect(() => {
     redrawAll();
@@ -550,10 +571,16 @@ export const Canvas: React.FC = () => {
     }
     needsLiveRender.current = false;
 
+    // Snapshot points immediately — currentPoints.current will be reset by the
+    // next pointerDown before React processes the dispatch. Taking a reference
+    // here ensures we always commit the correct set of points even if a new
+    // stroke starts before the React render cycle completes.
+    const points = [...currentPoints.current];
+    currentPoints.current = []; // clear immediately so next stroke starts fresh
+
     const page = getActivePage();
     if (!page) return;
 
-    const points = currentPoints.current;
     if (points.length === 0) return;
 
     const overlay = overlayRef.current;
@@ -845,17 +872,9 @@ export const Canvas: React.FC = () => {
     lastPointTime.current = point.timestamp;
     predictedPoint.current = null;
 
-    const overlay = overlayRef.current;
-    if (overlay) {
-      const octx = overlay.getContext('2d');
-      if (octx) {
-        const dpr = window.devicePixelRatio || 2;
-        const rect = overlay.getBoundingClientRect();
-        overlay.width = rect.width * dpr;
-        overlay.height = rect.height * dpr;
-        octx.scale(dpr, dpr);
-      }
-    }
+    // Do NOT resize the overlay canvas here — resizing resets the 2D context
+    // transform and causes rendering glitches on fast consecutive strokes.
+    // The overlay is resized only by the ResizeObserver when the container changes.
 
     if (state.activeTool === 'eraser' && state.eraserMode === 'pixel') {
       performPixelErase(point);
@@ -1067,10 +1086,16 @@ export const Canvas: React.FC = () => {
         if (!overlay) return;
         const octx = overlay.getContext('2d');
         if (!octx) return;
-        const rect = overlay.getBoundingClientRect();
+        // Use physical pixel dimensions for clearRect (canvas.width/height are in
+        // physical pixels after initOverlay sets them with dpr scaling).
+        // We must reset the transform before clearing, then re-apply dpr scale.
+        const dpr = window.devicePixelRatio || 2;
+        octx.setTransform(1, 0, 0, 1, 0, 0);
+        octx.clearRect(0, 0, overlay.width, overlay.height);
+        octx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
         if (state.activeTool === 'shape') {
-          octx.clearRect(0, 0, rect.width, rect.height);
+          // (clearRect already done above)
           octx.save();
           const t = transformRef.current;
           octx.translate(t.offsetX, t.offsetY);
@@ -1090,7 +1115,7 @@ export const Canvas: React.FC = () => {
           StrokeRenderer.renderStroke(octx, previewStroke);
           octx.restore();
         } else if (state.activeTool === 'eraser') {
-          octx.clearRect(0, 0, rect.width, rect.height);
+          // clearRect already done above
           if (state.eraserMode === 'selection' && currentPoints.current.length > 1) {
             octx.save();
             const t = transformRef.current;
@@ -1111,7 +1136,7 @@ export const Canvas: React.FC = () => {
             octx.restore();
           }
         } else {
-          octx.clearRect(0, 0, rect.width, rect.height);
+          // clearRect already done above
           octx.save();
           const t = transformRef.current;
           octx.translate(t.offsetX, t.offsetY);
