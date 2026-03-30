@@ -4,7 +4,7 @@ import { Canvas } from './components/Canvas';
 import { Toolbar } from './components/toolbar/Toolbar';
 import { Sidebar } from './components/sidebar/Sidebar';
 import { Header } from './components/Header';
-import { PageNavigator } from './components/PageNavigator';
+// PageNavigator is now integrated into Header
 import { NotebookTemplateModal } from './components/NotebookTemplateModal';
 import { exportToPDF } from './utils/pdfExport';
 import './styles/global.css';
@@ -74,7 +74,7 @@ const AppContent: React.FC = () => {
       </div>
 
       {hasNotebook && <Toolbar />}
-      {hasNotebook && <PageNavigator />}
+
 
       <Sidebar
         isOpen={sidebarOpen}

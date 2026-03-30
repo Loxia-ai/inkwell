@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { useApp } from '../store/AppContext';
 import { StrokeRenderer } from '../engine/StrokeRenderer';
 import { ShapeRecognizer } from '../engine/ShapeRecognizer';
@@ -19,9 +19,9 @@ const BACKGROUND_COLORS: Record<string, string> = {
 const LINE_SPACING = 32;
 const GRID_SPACING = 32;
 const DOT_SPACING = 32;
-const GRAPH_SPACING = 20; // 5mm-style small grid
-const MUSIC_STAFF_SPACING = 8; // line spacing within a staff
-const MUSIC_STAFF_GAP = 64; // gap between staff groups
+const GRAPH_SPACING = 20;
+const MUSIC_STAFF_SPACING = 8;
+const MUSIC_STAFF_GAP = 64;
 
 // Cache for loaded images
 const imageCache = new Map<string, HTMLImageElement>();
@@ -35,6 +35,53 @@ function getOrLoadImage(src: string): HTMLImageElement | null {
   img.src = src;
   imageCache.set(src, img);
   return img.complete ? img : null;
+}
+
+// ─── Image hit-testing helpers ─────────────────────────────
+
+function hitTestImage(img: PageImage, cx: number, cy: number): boolean {
+  // Transform point into image-local coordinates (accounting for rotation)
+  const icx = img.x + img.width / 2;
+  const icy = img.y + img.height / 2;
+  const rad = -(img.rotation * Math.PI) / 180;
+  const dx = cx - icx;
+  const dy = cy - icy;
+  const lx = dx * Math.cos(rad) - dy * Math.sin(rad);
+  const ly = dx * Math.sin(rad) + dy * Math.cos(rad);
+  return (
+    Math.abs(lx) <= img.width / 2 + 10 &&
+    Math.abs(ly) <= img.height / 2 + 10
+  );
+}
+
+type ImageHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'rotate';
+
+function hitTestImageHandle(img: PageImage, cx: number, cy: number): ImageHandle | null {
+  const icx = img.x + img.width / 2;
+  const icy = img.y + img.height / 2;
+  const rad = -(img.rotation * Math.PI) / 180;
+  const dx = cx - icx;
+  const dy = cy - icy;
+  const lx = dx * Math.cos(rad) - dy * Math.sin(rad);
+  const ly = dx * Math.sin(rad) + dy * Math.cos(rad);
+
+  const hw = img.width / 2;
+  const hh = img.height / 2;
+  const handleR = 16;
+
+  // Rotation handle (above top center)
+  if (Math.abs(lx) < handleR && Math.abs(ly + hh + 28) < handleR) return 'rotate';
+
+  // Corner handles
+  if (Math.abs(lx + hw) < handleR && Math.abs(ly + hh) < handleR) return 'nw';
+  if (Math.abs(lx - hw) < handleR && Math.abs(ly + hh) < handleR) return 'ne';
+  if (Math.abs(lx + hw) < handleR && Math.abs(ly - hh) < handleR) return 'sw';
+  if (Math.abs(lx - hw) < handleR && Math.abs(ly - hh) < handleR) return 'se';
+
+  // Body = move
+  if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) return 'move';
+
+  return null;
 }
 
 export const Canvas: React.FC = () => {
@@ -61,7 +108,50 @@ export const Canvas: React.FC = () => {
   const touchCache = useRef<Map<number, PointerEvent>>(new Map());
   const lastPinchDist = useRef<number | null>(null);
   const lastPanPos = useRef<{ x: number; y: number } | null>(null);
+  const isPanning = useRef(false);
   const transformRef = useRef({ offsetX: 0, offsetY: 0, scale: 1 });
+
+  // Image manipulation state
+  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
+  const imageManip = useRef<{
+    handle: ImageHandle;
+    imageId: string;
+    startX: number;
+    startY: number;
+    origImage: PageImage;
+  } | null>(null);
+
+  // ─── Ruler projection helper ────────────────────────────────
+
+  const projectToRulerLine = useCallback((px: number, py: number): { x: number; y: number } => {
+    if (!state.ruler.visible) return { x: px, y: py };
+
+    const { x: rx, y: ry, angle } = state.ruler;
+    const t = transformRef.current;
+
+    // Ruler position is in screen coords, convert to canvas coords
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: px, y: py };
+    const rect = canvas.getBoundingClientRect();
+    const rulerCanvasX = (rx - rect.left - t.offsetX) / t.scale;
+    // Ruler origin is at left edge, vertically centered (height=48, so +24)
+    const rulerCanvasY = (ry + 24 - rect.top - t.offsetY) / t.scale;
+
+    // Direction vector of the ruler line
+    const rad = (angle * Math.PI) / 180;
+    const dirX = Math.cos(rad);
+    const dirY = Math.sin(rad);
+
+    // Project point onto the ruler line
+    const vx = px - rulerCanvasX;
+    const vy = py - rulerCanvasY;
+    const dot = vx * dirX + vy * dirY;
+
+    return {
+      x: rulerCanvasX + dirX * dot,
+      y: rulerCanvasY + dirY * dot,
+    };
+  }, [state.ruler]);
 
   // ─── Background rendering ──────────────────────────────────
 
@@ -110,13 +200,11 @@ export const Canvas: React.FC = () => {
         }
       }
     } else if (bg === 'graph') {
-      // Engineering graph paper: small grid with major lines every 5
       const spacing = GRAPH_SPACING * t.scale;
       const startX = (t.offsetX % spacing);
       const startY = (t.offsetY % spacing);
       const majorEvery = 5;
 
-      // Minor grid lines
       ctx.strokeStyle = '#E8E8E5';
       ctx.lineWidth = 0.3;
       for (let x = startX; x < width; x += spacing) {
@@ -132,7 +220,6 @@ export const Canvas: React.FC = () => {
         ctx.stroke();
       }
 
-      // Major grid lines
       const majorSpacing = spacing * majorEvery;
       const majorStartX = (t.offsetX % majorSpacing);
       const majorStartY = (t.offsetY % majorSpacing);
@@ -151,11 +238,9 @@ export const Canvas: React.FC = () => {
         ctx.stroke();
       }
     } else if (bg === 'cornell') {
-      // Cornell Notes: left margin (30%), bottom summary area (25%), horizontal lines
       const marginX = width * 0.30;
       const summaryY = height * 0.75;
 
-      // Ruled lines in the main area
       ctx.strokeStyle = '#D5D5D3';
       ctx.lineWidth = 0.5;
       const lineSpacing = LINE_SPACING * t.scale;
@@ -167,7 +252,6 @@ export const Canvas: React.FC = () => {
         ctx.stroke();
       }
 
-      // Left margin line (Cue column)
       ctx.strokeStyle = '#E85D5D';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
@@ -175,7 +259,6 @@ export const Canvas: React.FC = () => {
       ctx.lineTo(marginX, height);
       ctx.stroke();
 
-      // Bottom summary separator
       ctx.strokeStyle = '#E85D5D';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
@@ -183,14 +266,12 @@ export const Canvas: React.FC = () => {
       ctx.lineTo(width, summaryY);
       ctx.stroke();
 
-      // Labels (subtle)
       ctx.fillStyle = 'rgba(0,0,0,0.08)';
       ctx.font = `${11 * t.scale}px -apple-system, sans-serif`;
       ctx.fillText('Cues', 8, 16);
       ctx.fillText('Notes', marginX + 8, 16);
       ctx.fillText('Summary', 8, summaryY + 16);
     } else if (bg === 'isometric') {
-      // Isometric grid: equilateral triangle pattern
       const spacing = 28 * t.scale;
       const h = spacing * Math.sqrt(3) / 2;
       ctx.strokeStyle = '#DDDDD8';
@@ -199,7 +280,6 @@ export const Canvas: React.FC = () => {
       const startX = (t.offsetX % spacing) - spacing;
       const startY = (t.offsetY % (h * 2)) - h * 2;
 
-      // Horizontal lines
       for (let y = startY; y < height + h; y += h) {
         ctx.beginPath();
         ctx.moveTo(0, y);
@@ -207,7 +287,6 @@ export const Canvas: React.FC = () => {
         ctx.stroke();
       }
 
-      // Diagonal lines (/ direction)
       for (let x = startX - height; x < width + height; x += spacing) {
         ctx.beginPath();
         ctx.moveTo(x, height + h);
@@ -215,7 +294,6 @@ export const Canvas: React.FC = () => {
         ctx.stroke();
       }
 
-      // Diagonal lines (\ direction)
       for (let x = startX - height; x < width + height; x += spacing) {
         ctx.beginPath();
         ctx.moveTo(x, -h);
@@ -223,12 +301,11 @@ export const Canvas: React.FC = () => {
         ctx.stroke();
       }
     } else if (bg === 'music') {
-      // Music staff paper: groups of 5 lines with gaps
       ctx.strokeStyle = '#B8B8B5';
       ctx.lineWidth = 0.6;
       const lineH = MUSIC_STAFF_SPACING * t.scale;
       const gapH = MUSIC_STAFF_GAP * t.scale;
-      const staffHeight = lineH * 4; // 5 lines = 4 gaps
+      const staffHeight = lineH * 4;
       const totalBlock = staffHeight + gapH;
       const startY = (t.offsetY % totalBlock);
 
@@ -248,11 +325,10 @@ export const Canvas: React.FC = () => {
 
   // ─── Render images on canvas ────────────────────────────────
 
-  const drawImages = useCallback((ctx: CanvasRenderingContext2D, images: PageImage[]) => {
+  const drawImages = useCallback((ctx: CanvasRenderingContext2D, images: PageImage[], selId: string | null) => {
     for (const img of images) {
       const htmlImg = getOrLoadImage(img.src);
       if (!htmlImg) {
-        // Image still loading, trigger redraw when ready
         const pending = imageCache.get(img.src);
         if (pending && !pending.complete) {
           pending.onload = () => redrawAll();
@@ -261,15 +337,61 @@ export const Canvas: React.FC = () => {
       }
       ctx.save();
       ctx.globalAlpha = img.opacity;
+      const cx = img.x + img.width / 2;
+      const cy = img.y + img.height / 2;
       if (img.rotation !== 0) {
-        const cx = img.x + img.width / 2;
-        const cy = img.y + img.height / 2;
         ctx.translate(cx, cy);
         ctx.rotate((img.rotation * Math.PI) / 180);
         ctx.drawImage(htmlImg, -img.width / 2, -img.height / 2, img.width, img.height);
       } else {
         ctx.drawImage(htmlImg, img.x, img.y, img.width, img.height);
       }
+
+      // Draw selection handles if selected
+      if (selId === img.id) {
+        if (img.rotation !== 0 && ctx.getTransform) {
+          // Already translated/rotated
+        } else {
+          ctx.translate(cx, cy);
+          ctx.rotate((img.rotation * Math.PI) / 180);
+        }
+        const hw = img.width / 2;
+        const hh = img.height / 2;
+
+        // Selection border
+        ctx.strokeStyle = '#007AFF';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(-hw, -hh, img.width, img.height);
+        ctx.setLineDash([]);
+
+        // Corner handles
+        const corners = [
+          [-hw, -hh], [hw, -hh], [-hw, hh], [hw, hh]
+        ];
+        for (const [hx, hy] of corners) {
+          ctx.fillStyle = '#FFFFFF';
+          ctx.strokeStyle = '#007AFF';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(hx, hy, 7, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+
+        // Rotation handle (above top center)
+        ctx.beginPath();
+        ctx.moveTo(0, -hh);
+        ctx.lineTo(0, -hh - 22);
+        ctx.strokeStyle = '#007AFF';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(0, -hh - 28, 7, 0, Math.PI * 2);
+        ctx.fillStyle = '#007AFF';
+        ctx.fill();
+      }
+
       ctx.restore();
     }
   }, []);
@@ -298,34 +420,28 @@ export const Canvas: React.FC = () => {
     ctx.translate(t.offsetX, t.offsetY);
     ctx.scale(t.scale, t.scale);
 
-    // Draw images below strokes
-    drawImages(ctx, page.images);
+    drawImages(ctx, page.images, selectedImageId);
 
     for (const stroke of page.strokes) {
       StrokeRenderer.renderStroke(ctx, stroke);
     }
 
     ctx.restore();
-  }, [getActivePage, drawBackground, drawImages]);
+  }, [getActivePage, drawBackground, drawImages, selectedImageId]);
 
   // ─── Resize handling ───────────────────────────────────────
 
   useEffect(() => {
-    const handleResize = () => {
-      redrawAll();
-    };
+    const handleResize = () => { redrawAll(); };
     window.addEventListener('resize', handleResize);
-
     const ro = new ResizeObserver(handleResize);
     if (containerRef.current) ro.observe(containerRef.current);
-
     return () => {
       window.removeEventListener('resize', handleResize);
       ro.disconnect();
     };
   }, [redrawAll]);
 
-  // Redraw when page/strokes change
   useEffect(() => {
     redrawAll();
   }, [state.activeNotebookId, state.activePageIndex, state.notebooks, redrawAll]);
@@ -343,7 +459,7 @@ export const Canvas: React.FC = () => {
     };
   }, []);
 
-  // ─── Pixel eraser: split strokes at eraser contact points ──
+  // ─── Pixel eraser ──────────────────────────────────────────
 
   const performPixelErase = useCallback((eraserPoint: Point) => {
     const page = getActivePage();
@@ -354,7 +470,6 @@ export const Canvas: React.FC = () => {
     for (const stroke of page.strokes) {
       if (pixelErasedIds.current.has(stroke.id)) continue;
       if (stroke.shapeData) {
-        // For shapes, just remove the whole shape if hit
         if (
           eraserPoint.x >= stroke.bounds.minX - eraserRadius &&
           eraserPoint.x <= stroke.bounds.maxX + eraserRadius &&
@@ -367,7 +482,6 @@ export const Canvas: React.FC = () => {
         continue;
       }
 
-      // Find which point indices are hit by the eraser
       const hitIndices = new Set<number>();
       for (let i = 0; i < stroke.points.length; i++) {
         const sp = stroke.points[i];
@@ -380,14 +494,12 @@ export const Canvas: React.FC = () => {
 
       if (hitIndices.size === 0) continue;
 
-      // If all points hit, just remove the whole stroke
       if (hitIndices.size >= stroke.points.length) {
         pixelErasedIds.current.add(stroke.id);
         pixelErasedStrokes.current.push(stroke);
         continue;
       }
 
-      // Split the stroke into segments that survive the eraser
       pixelErasedIds.current.add(stroke.id);
       pixelErasedStrokes.current.push(stroke);
 
@@ -403,7 +515,6 @@ export const Canvas: React.FC = () => {
       }
       if (currentSeg.length >= 2) segments.push(currentSeg);
 
-      // Create new strokes from surviving segments
       for (const seg of segments) {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         for (const p of seg) {
@@ -421,18 +532,16 @@ export const Canvas: React.FC = () => {
       }
     }
 
-    // Apply immediately for visual feedback
     if (pixelErasedStrokes.current.length > 0) {
       redrawAll();
     }
   }, [getActivePage, state.strokeStyle.width, redrawAll]);
 
-  // ─── Finish current stroke (used by rapid-tap recovery) ────
+  // ─── Finish current stroke ─────────────────────────────────
 
   const finishStroke = useCallback(() => {
     if (!isDrawing.current) return;
     isDrawing.current = false;
-    const prevPointerId = activePointerId.current;
     activePointerId.current = null;
     predictedPoint.current = null;
 
@@ -448,7 +557,6 @@ export const Canvas: React.FC = () => {
     const points = currentPoints.current;
     if (points.length === 0) return;
 
-    // Clear overlay
     const overlay = overlayRef.current;
     if (overlay) {
       const octx = overlay.getContext('2d');
@@ -463,7 +571,6 @@ export const Canvas: React.FC = () => {
       return;
     }
 
-    // Build stroke
     let shapeData = undefined;
     if (state.activeTool === 'shape') {
       const first = points[0];
@@ -496,18 +603,16 @@ export const Canvas: React.FC = () => {
     if (nb) persistNotebook(nb);
   }, [state.activeTool, state.activeShape, state.strokeStyle, getActivePage, getActiveNotebook, dispatch, persistNotebook]);
 
-  // ─── Commit eraser action based on mode ─────────────────────
+  // ─── Commit eraser ─────────────────────────────────────────
 
   const commitEraser = useCallback((page: NonNullable<ReturnType<typeof getActivePage>>, points: Point[]) => {
     const mode = state.eraserMode;
 
     if (mode === 'pixel') {
-      // Pixel eraser: remove erased strokes, add split fragments
       const erasedIds = Array.from(pixelErasedIds.current);
       if (erasedIds.length > 0) {
         dispatch({ type: 'PUSH_HISTORY', entry: { type: 'remove', pageId: page.id, strokes: [...pixelErasedStrokes.current] } });
         dispatch({ type: 'REMOVE_STROKES', pageId: page.id, strokeIds: erasedIds });
-        // Add the surviving fragments
         for (const ns of pixelNewStrokes.current) {
           dispatch({ type: 'ADD_STROKE', pageId: page.id, stroke: ns });
         }
@@ -521,10 +626,8 @@ export const Canvas: React.FC = () => {
     }
 
     if (mode === 'selection') {
-      // Selection eraser: delete strokes inside the lasso polygon
-      if (points.length < 3) return; // need at least a triangle
+      if (points.length < 3) return;
 
-      // Point-in-polygon test (ray casting algorithm)
       const isInsideLasso = (px: number, py: number): boolean => {
         let inside = false;
         for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
@@ -542,15 +645,12 @@ export const Canvas: React.FC = () => {
       const removedIds: string[] = [];
 
       for (const stroke of page.strokes) {
-        // Check if the stroke's center or any of its points are inside the lasso
         let inside = false;
         if (stroke.shapeData) {
-          // For shapes, check center of bounds
           const cx = (stroke.bounds.minX + stroke.bounds.maxX) / 2;
           const cy = (stroke.bounds.minY + stroke.bounds.maxY) / 2;
           inside = isInsideLasso(cx, cy);
         } else {
-          // For freehand strokes, check if majority of points are inside
           let insideCount = 0;
           const checkEvery = Math.max(1, Math.floor(stroke.points.length / 10));
           for (let i = 0; i < stroke.points.length; i += checkEvery) {
@@ -559,7 +659,7 @@ export const Canvas: React.FC = () => {
             }
           }
           const totalChecked = Math.ceil(stroke.points.length / checkEvery);
-          inside = insideCount > totalChecked * 0.3; // 30% threshold
+          inside = insideCount > totalChecked * 0.3;
         }
 
         if (inside) {
@@ -577,7 +677,6 @@ export const Canvas: React.FC = () => {
       return;
     }
 
-    // Default: stroke eraser (remove whole strokes on contact)
     const eraserRadius = state.strokeStyle.width * 2;
     const removedStrokes: Stroke[] = [];
     const removedIds: string[] = [];
@@ -591,17 +690,13 @@ export const Canvas: React.FC = () => {
             ep.x <= stroke.bounds.maxX + eraserRadius &&
             ep.y >= stroke.bounds.minY - eraserRadius &&
             ep.y <= stroke.bounds.maxY + eraserRadius
-          ) {
-            hit = true;
-            break;
-          }
+          ) { hit = true; break; }
         } else {
           for (const sp of stroke.points) {
             const dx = ep.x - sp.x;
             const dy = ep.y - sp.y;
             if (dx * dx + dy * dy < eraserRadius * eraserRadius) {
-              hit = true;
-              break;
+              hit = true; break;
             }
           }
         }
@@ -621,13 +716,23 @@ export const Canvas: React.FC = () => {
     }
   }, [state.eraserMode, state.strokeStyle.width, getActiveNotebook, dispatch, persistNotebook]);
 
+  // ─── Apply ruler constraint to a point ─────────────────────
+
+  const constrainPoint = useCallback((x: number, y: number): { x: number; y: number } => {
+    if (state.ruler.visible) {
+      return projectToRulerLine(x, y);
+    }
+    return { x, y };
+  }, [state.ruler.visible, projectToRulerLine]);
+
   // ─── Pointer handlers ─────────────────────────────────────
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    // Palm rejection: only accept pen input when enabled
+    // Palm rejection: touch → pinch/pan only
     if (state.palmRejection && e.pointerType === 'touch' && state.activeTool !== 'lasso') {
       touchCache.current.set(e.pointerId, e.nativeEvent);
       if (touchCache.current.size === 2) {
+        // Two fingers: start pinch
         const pts = Array.from(touchCache.current.values());
         lastPinchDist.current = Math.hypot(
           pts[1].clientX - pts[0].clientX,
@@ -637,17 +742,68 @@ export const Canvas: React.FC = () => {
           x: (pts[0].clientX + pts[1].clientX) / 2,
           y: (pts[0].clientY + pts[1].clientY) / 2,
         };
+        isPanning.current = false;
+      } else if (touchCache.current.size === 1) {
+        // Single finger: start pan
+        isPanning.current = true;
+        lastPanPos.current = { x: e.clientX, y: e.clientY };
       }
       return;
     }
 
-    // If we're already drawing with a DIFFERENT pointer, ignore.
-    // But if the SAME pointer re-enters (rapid tap), force-finish the previous stroke.
+    // Check if clicking on an image for manipulation
+    const page = getActivePage();
+    if (page && page.images.length > 0) {
+      const pos = screenToCanvas(e.clientX, e.clientY);
+
+      // Check selected image handles first
+      if (selectedImageId) {
+        const selImg = page.images.find(img => img.id === selectedImageId);
+        if (selImg) {
+          const handle = hitTestImageHandle(selImg, pos.x, pos.y);
+          if (handle) {
+            imageManip.current = {
+              handle,
+              imageId: selImg.id,
+              startX: pos.x,
+              startY: pos.y,
+              origImage: { ...selImg },
+            };
+            (e.target as HTMLElement).setPointerCapture(e.pointerId);
+            activePointerId.current = e.pointerId;
+            return;
+          }
+        }
+      }
+
+      // Check if clicking on any image (reverse order for top-most)
+      for (let i = page.images.length - 1; i >= 0; i--) {
+        if (hitTestImage(page.images[i], pos.x, pos.y)) {
+          setSelectedImageId(page.images[i].id);
+          imageManip.current = {
+            handle: 'move',
+            imageId: page.images[i].id,
+            startX: pos.x,
+            startY: pos.y,
+            origImage: { ...page.images[i] },
+          };
+          (e.target as HTMLElement).setPointerCapture(e.pointerId);
+          activePointerId.current = e.pointerId;
+          return;
+        }
+      }
+
+      // Clicked empty area — deselect image
+      if (selectedImageId) {
+        setSelectedImageId(null);
+      }
+    }
+
+    // Normal drawing
     if (isDrawing.current) {
       if (activePointerId.current !== null && activePointerId.current !== e.pointerId) {
-        return; // different pointer, ignore
+        return;
       }
-      // Same pointer or null — force-finish previous stroke so we don't drop this one
       finishStroke();
     }
 
@@ -660,9 +816,10 @@ export const Canvas: React.FC = () => {
     pixelNewStrokes.current = [];
 
     const pos = screenToCanvas(e.clientX, e.clientY);
+    const constrained = constrainPoint(pos.x, pos.y);
     const point: Point = {
-      x: pos.x,
-      y: pos.y,
+      x: constrained.x,
+      y: constrained.y,
       pressure: e.pressure || 0.5,
       timestamp: Date.now(),
     };
@@ -670,7 +827,6 @@ export const Canvas: React.FC = () => {
     lastPointTime.current = point.timestamp;
     predictedPoint.current = null;
 
-    // Clear overlay
     const overlay = overlayRef.current;
     if (overlay) {
       const octx = overlay.getContext('2d');
@@ -683,19 +839,20 @@ export const Canvas: React.FC = () => {
       }
     }
 
-    // Perform real-time pixel erasing on move (for immediate feedback)
     if (state.activeTool === 'eraser' && state.eraserMode === 'pixel') {
       performPixelErase(point);
     }
 
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  }, [state.palmRejection, state.activeTool, state.eraserMode, screenToCanvas, finishStroke, performPixelErase]);
+  }, [state.palmRejection, state.activeTool, state.eraserMode, screenToCanvas, finishStroke, performPixelErase, constrainPoint, getActivePage, selectedImageId]);
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
-    // Handle pinch/pan for touch
+    // Handle touch pan/pinch
     if (state.palmRejection && e.pointerType === 'touch') {
       touchCache.current.set(e.pointerId, e.nativeEvent);
+
       if (touchCache.current.size === 2 && lastPinchDist.current !== null) {
+        // Two-finger pinch-zoom at touch origin
         const pts = Array.from(touchCache.current.values());
         const dist = Math.hypot(
           pts[1].clientX - pts[0].clientX,
@@ -710,29 +867,111 @@ export const Canvas: React.FC = () => {
         const t = transformRef.current;
         const newScale = Math.min(5, Math.max(0.25, t.scale * scaleDelta));
 
-        if (lastPanPos.current) {
-          const panDx = center.x - lastPanPos.current.x;
-          const panDy = center.y - lastPanPos.current.y;
+        // Zoom around the pinch center (touch origin), not the canvas center
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const rect = canvas.getBoundingClientRect();
+          const pinchScreenX = center.x - rect.left;
+          const pinchScreenY = center.y - rect.top;
+
+          // The canvas point under the pinch center should stay fixed
+          const newOffsetX = pinchScreenX - (pinchScreenX - t.offsetX) * (newScale / t.scale);
+          const newOffsetY = pinchScreenY - (pinchScreenY - t.offsetY) * (newScale / t.scale);
+
+          // Also apply pan movement
+          const panDx = lastPanPos.current ? center.x - lastPanPos.current.x : 0;
+          const panDy = lastPanPos.current ? center.y - lastPanPos.current.y : 0;
+
           transformRef.current = {
-            offsetX: t.offsetX + panDx,
-            offsetY: t.offsetY + panDy,
+            offsetX: newOffsetX + panDx,
+            offsetY: newOffsetY + panDy,
             scale: newScale,
           };
         }
 
         lastPinchDist.current = dist;
         lastPanPos.current = center;
+        isPanning.current = false;
         redrawAll();
+      } else if (touchCache.current.size === 1 && isPanning.current && lastPanPos.current) {
+        // Single-finger pan
+        const panDx = e.clientX - lastPanPos.current.x;
+        const panDy = e.clientY - lastPanPos.current.y;
+        const t = transformRef.current;
+        transformRef.current = {
+          offsetX: t.offsetX + panDx,
+          offsetY: t.offsetY + panDy,
+          scale: t.scale,
+        };
+        lastPanPos.current = { x: e.clientX, y: e.clientY };
+        redrawAll();
+      }
+      return;
+    }
+
+    // Image manipulation
+    if (imageManip.current && e.pointerId === activePointerId.current) {
+      const pos = screenToCanvas(e.clientX, e.clientY);
+      const m = imageManip.current;
+      const page = getActivePage();
+      if (!page) return;
+
+      const dx = pos.x - m.startX;
+      const dy = pos.y - m.startY;
+
+      if (m.handle === 'move') {
+        dispatch({
+          type: 'UPDATE_IMAGE',
+          pageId: page.id,
+          imageId: m.imageId,
+          updates: {
+            x: m.origImage.x + dx,
+            y: m.origImage.y + dy,
+          },
+        });
+      } else if (m.handle === 'rotate') {
+        const icx = m.origImage.x + m.origImage.width / 2;
+        const icy = m.origImage.y + m.origImage.height / 2;
+        const startAngle = Math.atan2(m.startY - icy, m.startX - icx);
+        const currAngle = Math.atan2(pos.y - icy, pos.x - icx);
+        let newRot = m.origImage.rotation + (currAngle - startAngle) * (180 / Math.PI);
+        // Snap to 0/90/180/270
+        const snapAngles = [0, 90, 180, 270, -90, -180, -270];
+        for (const sa of snapAngles) {
+          if (Math.abs(newRot - sa) < 5) { newRot = sa; break; }
+        }
+        dispatch({
+          type: 'UPDATE_IMAGE',
+          pageId: page.id,
+          imageId: m.imageId,
+          updates: { rotation: newRot },
+        });
+      } else {
+        // Corner resize (nw, ne, sw, se)
+        const icx = m.origImage.x + m.origImage.width / 2;
+        const icy = m.origImage.y + m.origImage.height / 2;
+        const startDist = Math.hypot(m.startX - icx, m.startY - icy);
+        const currDist = Math.hypot(pos.x - icx, pos.y - icy);
+        const scaleFactor = startDist > 10 ? currDist / startDist : 1;
+        const newW = Math.max(20, m.origImage.width * scaleFactor);
+        const newH = Math.max(20, m.origImage.height * scaleFactor);
+        dispatch({
+          type: 'UPDATE_IMAGE',
+          pageId: page.id,
+          imageId: m.imageId,
+          updates: {
+            x: icx - newW / 2,
+            y: icy - newH / 2,
+            width: newW,
+            height: newH,
+          },
+        });
       }
       return;
     }
 
     if (!isDrawing.current || e.pointerId !== activePointerId.current) return;
 
-    // ─── Collect ALL coalesced events for complete capture ──────
-    // This is critical for fast writing — browsers batch multiple
-    // hardware events between frames, and getCoalescedEvents gives
-    // us every single one so no strokes are skipped.
     const coalesced = (e.nativeEvent as any).getCoalescedEvents?.() || [];
     const predicted = (e.nativeEvent as any).getPredictedEvents?.() || [];
     const now = Date.now();
@@ -740,36 +979,37 @@ export const Canvas: React.FC = () => {
     if (coalesced.length > 0) {
       for (const ce of coalesced) {
         const cp = screenToCanvas(ce.clientX, ce.clientY);
+        const constrained = constrainPoint(cp.x, cp.y);
         const newPt: Point = {
-          x: cp.x,
-          y: cp.y,
+          x: constrained.x,
+          y: constrained.y,
           pressure: ce.pressure || 0.5,
           timestamp: ce.timeStamp ? Math.round(ce.timeStamp) : now,
         };
-        // Skip duplicate points (distance threshold)
         const pts = currentPoints.current;
         if (pts.length > 0) {
           const last = pts[pts.length - 1];
-          const dx = newPt.x - last.x;
-          const dy = newPt.y - last.y;
-          if (dx * dx + dy * dy < 0.25) continue; // < 0.5px — skip
+          const ddx = newPt.x - last.x;
+          const ddy = newPt.y - last.y;
+          if (ddx * ddx + ddy * ddy < 0.25) continue;
         }
         currentPoints.current.push(newPt);
       }
     } else {
       const pos = screenToCanvas(e.clientX, e.clientY);
+      const constrained = constrainPoint(pos.x, pos.y);
       const newPt: Point = {
-        x: pos.x,
-        y: pos.y,
+        x: constrained.x,
+        y: constrained.y,
         pressure: e.pressure || 0.5,
         timestamp: now,
       };
       const pts = currentPoints.current;
       if (pts.length > 0) {
         const last = pts[pts.length - 1];
-        const dx = newPt.x - last.x;
-        const dy = newPt.y - last.y;
-        if (dx * dx + dy * dy >= 0.25) {
+        const ddx = newPt.x - last.x;
+        const ddy = newPt.y - last.y;
+        if (ddx * ddx + ddy * ddy >= 0.25) {
           currentPoints.current.push(newPt);
         }
       } else {
@@ -777,13 +1017,13 @@ export const Canvas: React.FC = () => {
       }
     }
 
-    // Store predicted point for smoother live rendering
     if (predicted.length > 0) {
       const pe = predicted[0];
       const pp = screenToCanvas(pe.clientX, pe.clientY);
+      const constrained = constrainPoint(pp.x, pp.y);
       predictedPoint.current = {
-        x: pp.x,
-        y: pp.y,
+        x: constrained.x,
+        y: constrained.y,
         pressure: pe.pressure || 0.5,
         timestamp: now,
       };
@@ -793,13 +1033,11 @@ export const Canvas: React.FC = () => {
 
     lastPointTime.current = now;
 
-    // ─── Pixel eraser: erase in real-time during drag ───────────
     if (state.activeTool === 'eraser' && state.eraserMode === 'pixel') {
       const lastPt = currentPoints.current[currentPoints.current.length - 1];
       if (lastPt) performPixelErase(lastPt);
     }
 
-    // ─── Schedule live render via rAF (batched for 60fps) ──────
     needsLiveRender.current = true;
     if (!rafId.current) {
       rafId.current = requestAnimationFrame(() => {
@@ -835,7 +1073,6 @@ export const Canvas: React.FC = () => {
           octx.restore();
         } else if (state.activeTool === 'eraser') {
           octx.clearRect(0, 0, rect.width, rect.height);
-          // Selection eraser: draw lasso path
           if (state.eraserMode === 'selection' && currentPoints.current.length > 1) {
             octx.save();
             const t = transformRef.current;
@@ -856,14 +1093,12 @@ export const Canvas: React.FC = () => {
             octx.restore();
           }
         } else {
-          // Full redraw of live stroke on overlay for smoothness
           octx.clearRect(0, 0, rect.width, rect.height);
           octx.save();
           const t = transformRef.current;
           octx.translate(t.offsetX, t.offsetY);
           octx.scale(t.scale, t.scale);
 
-          // Include predicted point for reduced latency
           const renderPoints = predictedPoint.current
             ? [...currentPoints.current, predictedPoint.current]
             : currentPoints.current;
@@ -878,24 +1113,42 @@ export const Canvas: React.FC = () => {
         }
       });
     }
-  }, [state.palmRejection, state.activeTool, state.eraserMode, state.activeShape, state.strokeStyle, screenToCanvas, redrawAll, performPixelErase]);
+  }, [state.palmRejection, state.activeTool, state.eraserMode, state.activeShape, state.strokeStyle, screenToCanvas, redrawAll, performPixelErase, constrainPoint, getActivePage, dispatch, selectedImageId]);
 
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
-    // Clean up touch cache
     touchCache.current.delete(e.pointerId);
     if (touchCache.current.size < 2) {
       lastPinchDist.current = null;
+    }
+    if (touchCache.current.size === 0) {
       lastPanPos.current = null;
+      isPanning.current = false;
+    }
+
+    // Finish image manipulation
+    if (imageManip.current && e.pointerId === activePointerId.current) {
+      imageManip.current = null;
+      activePointerId.current = null;
+      const nb = getActiveNotebook();
+      if (nb) persistNotebook(nb);
+      return;
     }
 
     if (!isDrawing.current || e.pointerId !== activePointerId.current) return;
-
-    // Delegate to finishStroke which handles all tool types
     finishStroke();
-  }, [finishStroke]);
+  }, [finishStroke, getActiveNotebook, persistNotebook]);
 
   const handlePointerCancel = useCallback((e: React.PointerEvent) => {
     touchCache.current.delete(e.pointerId);
+    if (touchCache.current.size === 0) {
+      isPanning.current = false;
+      lastPanPos.current = null;
+    }
+    if (imageManip.current && e.pointerId === activePointerId.current) {
+      imageManip.current = null;
+      activePointerId.current = null;
+      return;
+    }
     if (e.pointerId === activePointerId.current) {
       isDrawing.current = false;
       activePointerId.current = null;
@@ -988,9 +1241,9 @@ export const Canvas: React.FC = () => {
             const rulerY = state.ruler.y + 24;
 
             const onMove = (me: PointerEvent) => {
-              const dx = me.clientX - rulerX;
-              const dy = me.clientY - rulerY;
-              let ang = Math.atan2(dy, dx) * (180 / Math.PI);
+              const ddx = me.clientX - rulerX;
+              const ddy = me.clientY - rulerY;
+              let ang = Math.atan2(ddy, ddx) * (180 / Math.PI);
               const snapAngles = [0, 45, 90, 135, 180, -45, -90, -135];
               for (const sa of snapAngles) {
                 if (Math.abs(ang - sa) < 5) {

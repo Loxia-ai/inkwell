@@ -185,59 +185,59 @@ export const Toolbar: React.FC = () => {
           </button>
         ))}
 
-        {/* Shape submenu */}
-        {showShapeMenu && (
-          <div className="toolbar-popover shape-popover">
-            {SHAPES.map(shape => (
-              <button
-                key={shape.id}
-                className={`popover-btn ${state.activeShape === shape.id ? 'active' : ''}`}
-                onClick={() => {
-                  dispatch({ type: 'SET_SHAPE', shape: shape.id });
-                  setShowShapeMenu(false);
-                }}
-              >
-                <span>{shape.icon}</span>
-                <span>{shape.label}</span>
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Eraser submenu */}
-        {showEraserMenu && (
-          <div className="toolbar-popover eraser-popover">
-            {ERASER_MODES.map(mode => (
-              <button
-                key={mode.id}
-                className={`popover-btn eraser-mode-btn ${state.eraserMode === mode.id ? 'active' : ''}`}
-                onClick={() => {
-                  if (mode.id === 'clear') {
-                    // Clear page immediately
-                    if (page) {
-                      const allStrokes = page.strokes;
-                      if (allStrokes.length > 0) {
-                        dispatch({ type: 'PUSH_HISTORY', entry: { type: 'clear', pageId: page.id, strokes: allStrokes } });
-                        dispatch({ type: 'CLEAR_PAGE', pageId: page.id });
-                        const nb = getActiveNotebook();
-                        if (nb) persistNotebook(nb);
-                      }
-                    }
-                    setShowEraserMenu(false);
-                  } else {
-                    dispatch({ type: 'SET_ERASER_MODE', mode: mode.id });
-                    setShowEraserMenu(false);
-                  }
-                }}
-                title={mode.desc}
-              >
-                <span>{mode.icon}</span>
-                <span>{mode.label}</span>
-              </button>
-            ))}
-          </div>
-        )}
       </div>
+
+      {/* Shape submenu — rendered outside toolbar-center to avoid overflow clipping */}
+      {showShapeMenu && (
+        <div className="toolbar-popover shape-popover">
+          {SHAPES.map(shape => (
+            <button
+              key={shape.id}
+              className={`popover-btn ${state.activeShape === shape.id ? 'active' : ''}`}
+              onClick={() => {
+                dispatch({ type: 'SET_SHAPE', shape: shape.id });
+                setShowShapeMenu(false);
+              }}
+            >
+              <span>{shape.icon}</span>
+              <span>{shape.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Eraser submenu — rendered outside toolbar-center to avoid overflow clipping */}
+      {showEraserMenu && (
+        <div className="toolbar-popover eraser-popover">
+          {ERASER_MODES.map(mode => (
+            <button
+              key={mode.id}
+              className={`popover-btn eraser-mode-btn ${state.eraserMode === mode.id ? 'active' : ''}`}
+              onClick={() => {
+                if (mode.id === 'clear') {
+                  if (page) {
+                    const allStrokes = page.strokes;
+                    if (allStrokes.length > 0) {
+                      dispatch({ type: 'PUSH_HISTORY', entry: { type: 'clear', pageId: page.id, strokes: allStrokes } });
+                      dispatch({ type: 'CLEAR_PAGE', pageId: page.id });
+                      const nb = getActiveNotebook();
+                      if (nb) persistNotebook(nb);
+                    }
+                  }
+                  setShowEraserMenu(false);
+                } else {
+                  dispatch({ type: 'SET_ERASER_MODE', mode: mode.id });
+                  setShowEraserMenu(false);
+                }
+              }}
+              title={mode.desc}
+            >
+              <span>{mode.icon}</span>
+              <span>{mode.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="toolbar-section toolbar-right">
         {/* Image insert */}

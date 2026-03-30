@@ -25,7 +25,6 @@
 }
 
 .toolbar-center {
-  position: relative;
   display: flex;
   gap: 1px;
   background: rgba(0, 0, 0, 0.04);
@@ -156,6 +155,7 @@
   transform: translateX(-50%);
   display: flex;
   gap: 8px;
+  z-index: 210;
 }
 
 .eraser-popover {
@@ -163,6 +163,7 @@
   transform: translateX(-50%);
   display: flex;
   gap: 6px;
+  z-index: 210;
 }
 
 .eraser-mode-btn {
