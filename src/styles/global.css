@@ -1,0 +1,211 @@
+/* ─── Apple-Inspired Design System ────────────────────────────── */
+
+:root {
+  --system-font: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text',
+    'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --mono-font: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+
+  /* Colors */
+  --blue: #007AFF;
+  --green: #34C759;
+  --orange: #FF9500;
+  --red: #FF3B30;
+  --purple: #AF52DE;
+  --teal: #5AC8FA;
+  --gray-1: #8E8E93;
+  --gray-2: #AEAEB2;
+  --gray-3: #C7C7CC;
+  --gray-4: #D1D1D6;
+  --gray-5: #E5E5EA;
+  --gray-6: #F2F2F7;
+  --label: #1C1C1E;
+  --secondary-label: #3C3C43;
+  --bg: #FAFAF8;
+
+  /* Spacing */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --header-height: calc(52px + var(--safe-top));
+  --toolbar-height: calc(64px + var(--safe-bottom));
+
+  color-scheme: light;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--system-font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--bg);
+  color: var(--label);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Prevent iOS rubber-banding */
+body {
+  position: fixed;
+  inset: 0;
+}
+
+/* Prevent text selection on canvas */
+canvas {
+  touch-action: none;
+  -webkit-touch-callout: none;
+}
+
+/* Smooth scrolling */
+.scrollable {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/* ─── App Layout ─────────────────────────────────────────────── */
+
+.app {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.app-canvas-area {
+  flex: 1;
+  position: relative;
+  padding-top: var(--header-height);
+  padding-bottom: var(--toolbar-height);
+}
+
+/* ─── Empty State ────────────────────────────────────────────── */
+
+.canvas-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--gray-1);
+  gap: 12px;
+}
+
+.canvas-empty-icon {
+  font-size: 64px;
+  opacity: 0.6;
+}
+
+.canvas-empty p {
+  font-size: 17px;
+  font-weight: 500;
+}
+
+/* ─── Welcome Screen ─────────────────────────────────────────── */
+
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 40px;
+  text-align: center;
+}
+
+.welcome-icon {
+  width: 80px;
+  height: 80px;
+  margin-bottom: 24px;
+}
+
+.welcome h1 {
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.8px;
+  margin-bottom: 8px;
+  background: linear-gradient(135deg, #007AFF, #5856D6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.welcome p {
+  font-size: 17px;
+  color: var(--gray-1);
+  max-width: 360px;
+  line-height: 1.5;
+  margin-bottom: 32px;
+}
+
+.welcome-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 28px;
+  border: none;
+  border-radius: 14px;
+  background: var(--blue);
+  color: white;
+  font-size: 17px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: var(--system-font);
+}
+
+.welcome-btn:active {
+  transform: scale(0.97);
+  opacity: 0.9;
+}
+
+/* ─── Animations ─────────────────────────────────────────────── */
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ─── Scrollbar (for sidebar) ────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}

@@ -1,0 +1,107 @@
+import React, { useState, useCallback, useEffect } from 'react';
+import { AppProvider, useApp } from './store/AppContext';
+import { Canvas } from './components/Canvas';
+import { Toolbar } from './components/toolbar/Toolbar';
+import { Sidebar } from './components/sidebar/Sidebar';
+import { Header } from './components/Header';
+import { PageNavigator } from './components/PageNavigator';
+import { NotebookTemplateModal } from './components/NotebookTemplateModal';
+import { exportToPDF } from './utils/pdfExport';
+import './styles/global.css';
+
+const AppContent: React.FC = () => {
+  const { state, dispatch, getActiveNotebook } = useApp();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [templateModalOpen, setTemplateModalOpen] = useState(false);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          dispatch({ type: 'REDO' });
+        } else {
+          dispatch({ type: 'UNDO' });
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [dispatch]);
+
+  const handleNewNotebook = useCallback(() => {
+    setTemplateModalOpen(true);
+  }, []);
+
+  const handleExportPDF = useCallback(async () => {
+    const nb = getActiveNotebook();
+    if (nb) {
+      await exportToPDF(nb);
+    }
+  }, [getActiveNotebook]);
+
+  const hasNotebook = state.activeNotebookId !== null;
+
+  return (
+    <div className="app">
+      <Header
+        onOpenSidebar={() => setSidebarOpen(true)}
+        onExportPDF={handleExportPDF}
+      />
+
+      <div className="app-canvas-area">
+        {hasNotebook ? (
+          <Canvas />
+        ) : (
+          <div className="welcome">
+            <svg className="welcome-icon" viewBox="0 0 80 80" fill="none">
+              <rect width="80" height="80" rx="18" fill="url(#grad)" />
+              <defs>
+                <linearGradient id="grad" x1="0" y1="0" x2="80" y2="80">
+                  <stop offset="0%" stopColor="#007AFF" />
+                  <stop offset="100%" stopColor="#5856D6" />
+                </linearGradient>
+              </defs>
+              <path d="M25 55 L40 20 L42 20 L35 55 Z" fill="white" opacity="0.9" />
+              <path d="M38 55 L53 20 L55 20 L48 55 Z" fill="white" opacity="0.7" />
+            </svg>
+            <h1>Inkwell</h1>
+            <p>A beautiful notebook for your iPad. Write, sketch, and create with precision.</p>
+            <button className="welcome-btn" onClick={handleNewNotebook}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              Create Notebook
+            </button>
+          </div>
+        )}
+      </div>
+
+      {hasNotebook && <Toolbar />}
+      {hasNotebook && <PageNavigator />}
+
+      <Sidebar
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        onNewNotebook={handleNewNotebook}
+      />
+
+      <NotebookTemplateModal
+        isOpen={templateModalOpen}
+        onClose={() => setTemplateModalOpen(false)}
+      />
+    </div>
+  );
+};
+
+const App: React.FC = () => {
+  return (
+    <AppProvider>
+      <AppContent />
+    </AppProvider>
+  );
+};
+
+export default App;
