@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { useApp } from '../../store/AppContext';
-import { ToolType, ShapeType, PageBackground, PageImage } from '../../types';
+import { ToolType, ShapeType, PageBackground, PageImage, EraserMode } from '../../types';
 import { ColorPicker } from './ColorPicker';
 import { SizeSlider } from './SizeSlider';
 import { v4 as uuid } from 'uuid';
@@ -44,7 +44,15 @@ export const Toolbar: React.FC = () => {
   const [showShapeMenu, setShowShapeMenu] = useState(false);
   const [showBgMenu, setShowBgMenu] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [showEraserMenu, setShowEraserMenu] = useState(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
+
+  const ERASER_MODES: { id: EraserMode; icon: string; label: string; desc: string }[] = [
+    { id: 'stroke', icon: '🧹', label: 'Stroke', desc: 'Remove whole strokes' },
+    { id: 'pixel', icon: '✂️', label: 'Pixel', desc: 'Erase parts of strokes' },
+    { id: 'selection', icon: '⬚', label: 'Select', desc: 'Select area to delete' },
+    { id: 'clear', icon: '🗑️', label: 'Clear Page', desc: 'Remove all strokes' },
+  ];
 
   const closeAll = () => {
     setShowColorPicker(false);
@@ -52,6 +60,7 @@ export const Toolbar: React.FC = () => {
     setShowShapeMenu(false);
     setShowBgMenu(false);
     setShowMoreMenu(false);
+    setShowEraserMenu(false);
   };
 
   const handleToolSelect = (tool: ToolType) => {
@@ -63,6 +72,11 @@ export const Toolbar: React.FC = () => {
     if (tool === 'shape') {
       dispatch({ type: 'SET_TOOL', tool: 'shape' });
       setShowShapeMenu(!showShapeMenu);
+      return;
+    }
+    if (tool === 'eraser') {
+      dispatch({ type: 'SET_TOOL', tool: 'eraser' });
+      setShowEraserMenu(!showEraserMenu);
       return;
     }
     dispatch({ type: 'SET_TOOL', tool });
@@ -185,6 +199,40 @@ export const Toolbar: React.FC = () => {
               >
                 <span>{shape.icon}</span>
                 <span>{shape.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Eraser submenu */}
+        {showEraserMenu && (
+          <div className="toolbar-popover eraser-popover">
+            {ERASER_MODES.map(mode => (
+              <button
+                key={mode.id}
+                className={`popover-btn eraser-mode-btn ${state.eraserMode === mode.id ? 'active' : ''}`}
+                onClick={() => {
+                  if (mode.id === 'clear') {
+                    // Clear page immediately
+                    if (page) {
+                      const allStrokes = page.strokes;
+                      if (allStrokes.length > 0) {
+                        dispatch({ type: 'PUSH_HISTORY', entry: { type: 'clear', pageId: page.id, strokes: allStrokes } });
+                        dispatch({ type: 'CLEAR_PAGE', pageId: page.id });
+                        const nb = getActiveNotebook();
+                        if (nb) persistNotebook(nb);
+                      }
+                    }
+                    setShowEraserMenu(false);
+                  } else {
+                    dispatch({ type: 'SET_ERASER_MODE', mode: mode.id });
+                    setShowEraserMenu(false);
+                  }
+                }}
+                title={mode.desc}
+              >
+                <span>{mode.icon}</span>
+                <span>{mode.label}</span>
               </button>
             ))}
           </div>

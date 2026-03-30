@@ -158,6 +158,21 @@
   gap: 8px;
 }
 
+.eraser-popover {
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+}
+
+.eraser-mode-btn {
+  min-width: 60px;
+}
+
+.eraser-mode-btn span:first-child {
+  font-size: 22px;
+}
+
 .color-popover {
   right: 80px;
 }

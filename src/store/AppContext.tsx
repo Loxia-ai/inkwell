@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, useRef, useEffect } from 'react';
-import { AppState, Notebook, Stroke, ToolType, ShapeType, StrokeStyle, HistoryEntry, Page, PageBackground, PageImage } from '../types';
+import { AppState, Notebook, Stroke, ToolType, ShapeType, StrokeStyle, HistoryEntry, Page, PageBackground, PageImage, EraserMode, Point } from '../types';
 import { getAllNotebooks, saveNotebook, createNotebook, createBlankPage, deleteNotebook as dbDeleteNotebook } from './db';
 import { v4 as uuid } from 'uuid';
 
@@ -30,7 +30,11 @@ type Action =
   | { type: 'SET_RULER_POSITION'; x: number; y: number }
   | { type: 'ADD_IMAGE'; pageId: string; image: PageImage }
   | { type: 'REMOVE_IMAGE'; pageId: string; imageId: string }
-  | { type: 'UPDATE_IMAGE'; pageId: string; imageId: string; updates: Partial<PageImage> };
+  | { type: 'UPDATE_IMAGE'; pageId: string; imageId: string; updates: Partial<PageImage> }
+  | { type: 'SET_ERASER_MODE'; mode: EraserMode }
+  | { type: 'SET_SELECTION'; path: Point[]; strokeIds: string[] }
+  | { type: 'CLEAR_SELECTION' }
+  | { type: 'SPLIT_STROKE'; pageId: string; strokeId: string; newStrokes: Stroke[] };
 
 const initialStrokeStyle: StrokeStyle = {
   color: '#000000',
@@ -45,12 +49,15 @@ const initialState: AppState = {
   activePageIndex: 0,
   activeTool: 'pen',
   activeShape: 'rectangle',
+  eraserMode: 'stroke',
   strokeStyle: initialStrokeStyle,
   canvasTransform: { offsetX: 0, offsetY: 0, scale: 1 },
   ruler: { visible: false, x: 200, y: 400, angle: 0, length: 600 },
   undoStack: [],
   redoStack: [],
   palmRejection: true,
+  selectionPath: [],
+  selectedStrokeIds: [],
 };
 
 function getActivePage(state: AppState): Page | null {
@@ -187,7 +194,8 @@ function reducer(state: AppState, action: Action): AppState {
           ...page,
           strokes: page.strokes.filter(s => !ids.includes(s.id)),
         }));
-      } else if (entry.type === 'remove') {
+      } else if (entry.type === 'remove' || entry.type === 'clear') {
+        // Restore removed/cleared strokes
         newState = updatePageInState(newState, entry.pageId, page => ({
           ...page,
           strokes: [...page.strokes, ...entry.strokes],
@@ -208,6 +216,13 @@ function reducer(state: AppState, action: Action): AppState {
           strokes: [...page.strokes, ...entry.strokes],
         }));
       } else if (entry.type === 'remove') {
+        const ids = entry.strokes.map(s => s.id);
+        newState = updatePageInState(newState, entry.pageId, page => ({
+          ...page,
+          strokes: page.strokes.filter(s => !ids.includes(s.id)),
+        }));
+      } else if (entry.type === 'clear') {
+        // Re-clear: remove all the strokes that were restored
         const ids = entry.strokes.map(s => s.id);
         newState = updatePageInState(newState, entry.pageId, page => ({
           ...page,
@@ -249,6 +264,24 @@ function reducer(state: AppState, action: Action): AppState {
         ...page,
         images: page.images.map(img =>
           img.id === action.imageId ? { ...img, ...action.updates } : img
+        ),
+        updatedAt: Date.now(),
+      }));
+
+    case 'SET_ERASER_MODE':
+      return { ...state, eraserMode: action.mode };
+
+    case 'SET_SELECTION':
+      return { ...state, selectionPath: action.path, selectedStrokeIds: action.strokeIds };
+
+    case 'CLEAR_SELECTION':
+      return { ...state, selectionPath: [], selectedStrokeIds: [] };
+
+    case 'SPLIT_STROKE':
+      return updatePageInState(state, action.pageId, page => ({
+        ...page,
+        strokes: page.strokes.flatMap(s =>
+          s.id === action.strokeId ? action.newStrokes : [s]
         ),
         updatedAt: Date.now(),
       }));

@@ -12,8 +12,9 @@ export class StrokeRenderer {
   private static pressureCache = new WeakMap<Point[], Float64Array>();
 
   /**
-   * Smooth pressure values using a bilateral filter.
-   * Eliminates jitter while preserving intentional pressure changes.
+   * Smooth pressure values using adaptive bilateral filter.
+   * Uses distance-weighted Gaussian kernel that preserves intentional
+   * pressure changes while eliminating sensor jitter.
    */
   private static getSmoothedPressures(points: Point[]): Float64Array {
     const cached = StrokeRenderer.pressureCache.get(points);
@@ -24,29 +25,50 @@ export class StrokeRenderer {
     if (n === 0) return smoothed;
     if (n === 1) { smoothed[0] = Math.max(0.1, points[0].pressure); return smoothed; }
 
-    // Two-pass Gaussian-like smoothing (window=5, sigma adaptive)
     const raw = new Float64Array(n);
     for (let i = 0; i < n; i++) {
       raw[i] = Math.max(0.05, points[i].pressure);
     }
 
-    // First pass: forward EMA
-    const alpha = 0.35;
+    // Adaptive alpha based on distance — fast strokes get more smoothing
+    // Three-pass smoothing: forward EMA, backward EMA, Gaussian kernel
+
+    // Pass 1: Forward EMA with adaptive alpha
     const pass1 = new Float64Array(n);
     pass1[0] = raw[0];
     for (let i = 1; i < n; i++) {
+      const dx = points[i].x - points[i - 1].x;
+      const dy = points[i].y - points[i - 1].y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      // Closer points → more smoothing (lower alpha = more lag)
+      // Farther points → less smoothing (preserve intentional change)
+      const alpha = Math.min(0.6, Math.max(0.15, dist / 20));
       pass1[i] = alpha * raw[i] + (1 - alpha) * pass1[i - 1];
     }
 
-    // Second pass: backward EMA
+    // Pass 2: Backward EMA with same adaptive logic
     const pass2 = new Float64Array(n);
     pass2[n - 1] = pass1[n - 1];
     for (let i = n - 2; i >= 0; i--) {
+      const dx = points[i + 1].x - points[i].x;
+      const dy = points[i + 1].y - points[i].y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const alpha = Math.min(0.6, Math.max(0.15, dist / 20));
       pass2[i] = alpha * pass1[i] + (1 - alpha) * pass2[i + 1];
     }
 
+    // Pass 3: Local Gaussian kernel (window=7) for final polish
+    const KERNEL_RADIUS = 3;
     for (let i = 0; i < n; i++) {
-      smoothed[i] = Math.max(0.05, pass2[i]);
+      let sum = 0;
+      let weightSum = 0;
+      for (let j = -KERNEL_RADIUS; j <= KERNEL_RADIUS; j++) {
+        const idx = Math.max(0, Math.min(n - 1, i + j));
+        const weight = Math.exp(-(j * j) / (2 * 2)); // sigma=2
+        sum += pass2[idx] * weight;
+        weightSum += weight;
+      }
+      smoothed[i] = Math.max(0.05, sum / weightSum);
     }
 
     StrokeRenderer.pressureCache.set(points, smoothed);
@@ -271,9 +293,8 @@ export class StrokeRenderer {
     const smoothedPressures = StrokeRenderer.getSmoothedPressures(points);
     const n = points.length;
 
-    // Generate interpolated centerline points with sub-segment resolution
+    // Generate interpolated centerline points with adaptive subdivision
     const centerline: { x: number; y: number; w: number }[] = [];
-    const SUBDIVISIONS = 3; // interpolation steps between each pair
 
     for (let i = 0; i < n - 1; i++) {
       const p0 = points[Math.max(i - 1, 0)];
@@ -283,6 +304,17 @@ export class StrokeRenderer {
 
       const w1 = StrokeRenderer.getWidth(style, smoothedPressures[i]);
       const w2 = StrokeRenderer.getWidth(style, smoothedPressures[Math.min(i + 1, n - 1)]);
+
+      // Adaptive subdivision: more subdivisions for longer segments and
+      // where width changes significantly (thick↔thin transitions)
+      const segDx = p2.x - p1.x;
+      const segDy = p2.y - p1.y;
+      const segLen = Math.sqrt(segDx * segDx + segDy * segDy);
+      const widthDelta = Math.abs(w2 - w1);
+      // Base 4 subs, up to 12 for long segments or big width changes
+      const SUBDIVISIONS = Math.max(4, Math.min(12,
+        Math.ceil(segLen / 4) + Math.ceil(widthDelta / 0.5)
+      ));
 
       for (let s = 0; s < SUBDIVISIONS; s++) {
         const t = s / SUBDIVISIONS;
@@ -302,7 +334,11 @@ export class StrokeRenderer {
           (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * tt +
           (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * ttt
         );
-        const w = w1 + (w2 - w1) * t;
+        // Smooth cubic interpolation for width (Hermite)
+        const t2 = t * t;
+        const t3 = t2 * t;
+        const h = 3 * t2 - 2 * t3; // smoothstep
+        const w = w1 + (w2 - w1) * h;
 
         centerline.push({ x, y, w: w / 2 });
       }
@@ -311,6 +347,14 @@ export class StrokeRenderer {
     const lastP = points[n - 1];
     const lastW = StrokeRenderer.getWidth(style, smoothedPressures[n - 1]);
     centerline.push({ x: lastP.x, y: lastP.y, w: lastW / 2 });
+
+    // Post-process: smooth the widths along the centerline for silk-like transitions
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 1; i < centerline.length - 1; i++) {
+        centerline[i].w = centerline[i].w * 0.5 +
+          (centerline[i - 1].w + centerline[i + 1].w) * 0.25;
+      }
+    }
 
     if (centerline.length < 2) return;
 
@@ -626,16 +670,19 @@ export class StrokeRenderer {
   }
 
   /**
-   * Calculate width from pressure. Gentler curve for natural feel.
-   * Maps pressure [0,1] to a smooth width range.
+   * Calculate width from pressure with natural pen feel.
+   * Uses a wider dynamic range and smooth S-curve for
+   * expressive thick↔thin transitions like real ink.
    */
   static getWidth(style: StrokeStyle, pressure: number): number {
-    const minW = style.width * 0.45;
-    const maxW = style.width * 1.2;
-    // Smooth cubic ease for natural pressure response
-    const t = Math.max(0.08, Math.min(1, pressure));
-    // Attempt a more linear-feeling curve with slight ease
-    const eased = t * (2 - t); // ease-out quadratic — responsive but not harsh
+    const minW = style.width * 0.25;  // thinner min for more contrast
+    const maxW = style.width * 1.5;   // thicker max for expressiveness
+    const t = Math.max(0.05, Math.min(1, pressure));
+    // Smooth S-curve (hermite smoothstep) — natural ink feel
+    // Slight bias toward medium width so light touches aren't invisible
+    const s = t * t * (3 - 2 * t); // smoothstep
+    // Blend 70% smoothstep + 30% linear for responsiveness
+    const eased = s * 0.7 + t * 0.3;
     return minW + (maxW - minW) * eased;
   }
 }

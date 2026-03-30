@@ -20,6 +20,9 @@ export type ToolType =
   | 'marker'
   | 'spray';
 
+/** Eraser sub-modes */
+export type EraserMode = 'stroke' | 'pixel' | 'selection' | 'clear';
+
 export type ShapeType = 'line' | 'circle' | 'rectangle' | 'arrow';
 
 export interface StrokeStyle {
@@ -144,12 +147,17 @@ export interface AppState {
   activePageIndex: number;
   activeTool: ToolType;
   activeShape: ShapeType;
+  eraserMode: EraserMode;
   strokeStyle: StrokeStyle;
   canvasTransform: CanvasTransform;
   ruler: RulerState;
   undoStack: HistoryEntry[];
   redoStack: HistoryEntry[];
   palmRejection: boolean;
+  /** Active lasso selection points (canvas coords) */
+  selectionPath: Point[];
+  /** Stroke IDs currently selected by lasso */
+  selectedStrokeIds: string[];
 }
 
 export interface HistoryEntry {

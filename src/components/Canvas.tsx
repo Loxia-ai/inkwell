@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useCallback } from 'react';
 import { useApp } from '../store/AppContext';
 import { StrokeRenderer } from '../engine/StrokeRenderer';
 import { ShapeRecognizer } from '../engine/ShapeRecognizer';
-import { Point, Stroke, Bounds, PageImage } from '../types';
+import { Point, Stroke, Bounds, PageImage, EraserMode } from '../types';
 import { v4 as uuid } from 'uuid';
 
 const BACKGROUND_COLORS: Record<string, string> = {
@@ -52,6 +52,10 @@ export const Canvas: React.FC = () => {
   const needsLiveRender = useRef(false);
   const lastPointTime = useRef(0);
   const predictedPoint = useRef<Point | null>(null);
+  // Track strokes erased during pixel-eraser drag
+  const pixelErasedIds = useRef<Set<string>>(new Set());
+  const pixelErasedStrokes = useRef<Stroke[]>([]);
+  const pixelNewStrokes = useRef<Stroke[]>([]);
 
   // Pinch/pan state
   const touchCache = useRef<Map<number, PointerEvent>>(new Map());
@@ -339,6 +343,284 @@ export const Canvas: React.FC = () => {
     };
   }, []);
 
+  // ─── Pixel eraser: split strokes at eraser contact points ──
+
+  const performPixelErase = useCallback((eraserPoint: Point) => {
+    const page = getActivePage();
+    if (!page) return;
+    const eraserRadius = state.strokeStyle.width * 2;
+    const r2 = eraserRadius * eraserRadius;
+
+    for (const stroke of page.strokes) {
+      if (pixelErasedIds.current.has(stroke.id)) continue;
+      if (stroke.shapeData) {
+        // For shapes, just remove the whole shape if hit
+        if (
+          eraserPoint.x >= stroke.bounds.minX - eraserRadius &&
+          eraserPoint.x <= stroke.bounds.maxX + eraserRadius &&
+          eraserPoint.y >= stroke.bounds.minY - eraserRadius &&
+          eraserPoint.y <= stroke.bounds.maxY + eraserRadius
+        ) {
+          pixelErasedIds.current.add(stroke.id);
+          pixelErasedStrokes.current.push(stroke);
+        }
+        continue;
+      }
+
+      // Find which point indices are hit by the eraser
+      const hitIndices = new Set<number>();
+      for (let i = 0; i < stroke.points.length; i++) {
+        const sp = stroke.points[i];
+        const dx = eraserPoint.x - sp.x;
+        const dy = eraserPoint.y - sp.y;
+        if (dx * dx + dy * dy < r2) {
+          hitIndices.add(i);
+        }
+      }
+
+      if (hitIndices.size === 0) continue;
+
+      // If all points hit, just remove the whole stroke
+      if (hitIndices.size >= stroke.points.length) {
+        pixelErasedIds.current.add(stroke.id);
+        pixelErasedStrokes.current.push(stroke);
+        continue;
+      }
+
+      // Split the stroke into segments that survive the eraser
+      pixelErasedIds.current.add(stroke.id);
+      pixelErasedStrokes.current.push(stroke);
+
+      const segments: Point[][] = [];
+      let currentSeg: Point[] = [];
+      for (let i = 0; i < stroke.points.length; i++) {
+        if (hitIndices.has(i)) {
+          if (currentSeg.length >= 2) segments.push(currentSeg);
+          currentSeg = [];
+        } else {
+          currentSeg.push(stroke.points[i]);
+        }
+      }
+      if (currentSeg.length >= 2) segments.push(currentSeg);
+
+      // Create new strokes from surviving segments
+      for (const seg of segments) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const p of seg) {
+          minX = Math.min(minX, p.x);
+          minY = Math.min(minY, p.y);
+          maxX = Math.max(maxX, p.x);
+          maxY = Math.max(maxY, p.y);
+        }
+        pixelNewStrokes.current.push({
+          id: uuid(),
+          points: seg,
+          style: { ...stroke.style },
+          bounds: { minX, minY, maxX, maxY },
+        });
+      }
+    }
+
+    // Apply immediately for visual feedback
+    if (pixelErasedStrokes.current.length > 0) {
+      redrawAll();
+    }
+  }, [getActivePage, state.strokeStyle.width, redrawAll]);
+
+  // ─── Finish current stroke (used by rapid-tap recovery) ────
+
+  const finishStroke = useCallback(() => {
+    if (!isDrawing.current) return;
+    isDrawing.current = false;
+    const prevPointerId = activePointerId.current;
+    activePointerId.current = null;
+    predictedPoint.current = null;
+
+    if (rafId.current) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = 0;
+    }
+    needsLiveRender.current = false;
+
+    const page = getActivePage();
+    if (!page) return;
+
+    const points = currentPoints.current;
+    if (points.length === 0) return;
+
+    // Clear overlay
+    const overlay = overlayRef.current;
+    if (overlay) {
+      const octx = overlay.getContext('2d');
+      if (octx) {
+        const rect = overlay.getBoundingClientRect();
+        octx.clearRect(0, 0, rect.width, rect.height);
+      }
+    }
+
+    if (state.activeTool === 'eraser') {
+      commitEraser(page, points);
+      return;
+    }
+
+    // Build stroke
+    let shapeData = undefined;
+    if (state.activeTool === 'shape') {
+      const first = points[0];
+      const last = points[points.length - 1];
+      shapeData = ShapeRecognizer.createShape(
+        state.activeShape, first.x, first.y, last.x, last.y
+      );
+    }
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of points) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+    }
+
+    const stroke: Stroke = {
+      id: uuid(),
+      points: shapeData ? [] : points,
+      style: { ...state.strokeStyle },
+      bounds: { minX, minY, maxX, maxY },
+      shapeData,
+    };
+
+    dispatch({ type: 'PUSH_HISTORY', entry: { type: 'add', pageId: page.id, strokes: [stroke] } });
+    dispatch({ type: 'ADD_STROKE', pageId: page.id, stroke });
+
+    const nb = getActiveNotebook();
+    if (nb) persistNotebook(nb);
+  }, [state.activeTool, state.activeShape, state.strokeStyle, getActivePage, getActiveNotebook, dispatch, persistNotebook]);
+
+  // ─── Commit eraser action based on mode ─────────────────────
+
+  const commitEraser = useCallback((page: NonNullable<ReturnType<typeof getActivePage>>, points: Point[]) => {
+    const mode = state.eraserMode;
+
+    if (mode === 'pixel') {
+      // Pixel eraser: remove erased strokes, add split fragments
+      const erasedIds = Array.from(pixelErasedIds.current);
+      if (erasedIds.length > 0) {
+        dispatch({ type: 'PUSH_HISTORY', entry: { type: 'remove', pageId: page.id, strokes: [...pixelErasedStrokes.current] } });
+        dispatch({ type: 'REMOVE_STROKES', pageId: page.id, strokeIds: erasedIds });
+        // Add the surviving fragments
+        for (const ns of pixelNewStrokes.current) {
+          dispatch({ type: 'ADD_STROKE', pageId: page.id, stroke: ns });
+        }
+        const nb = getActiveNotebook();
+        if (nb) persistNotebook(nb);
+      }
+      pixelErasedIds.current.clear();
+      pixelErasedStrokes.current = [];
+      pixelNewStrokes.current = [];
+      return;
+    }
+
+    if (mode === 'selection') {
+      // Selection eraser: delete strokes inside the lasso polygon
+      if (points.length < 3) return; // need at least a triangle
+
+      // Point-in-polygon test (ray casting algorithm)
+      const isInsideLasso = (px: number, py: number): boolean => {
+        let inside = false;
+        for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+          const xi = points[i].x, yi = points[i].y;
+          const xj = points[j].x, yj = points[j].y;
+          if (((yi > py) !== (yj > py)) &&
+              (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+            inside = !inside;
+          }
+        }
+        return inside;
+      };
+
+      const removedStrokes: Stroke[] = [];
+      const removedIds: string[] = [];
+
+      for (const stroke of page.strokes) {
+        // Check if the stroke's center or any of its points are inside the lasso
+        let inside = false;
+        if (stroke.shapeData) {
+          // For shapes, check center of bounds
+          const cx = (stroke.bounds.minX + stroke.bounds.maxX) / 2;
+          const cy = (stroke.bounds.minY + stroke.bounds.maxY) / 2;
+          inside = isInsideLasso(cx, cy);
+        } else {
+          // For freehand strokes, check if majority of points are inside
+          let insideCount = 0;
+          const checkEvery = Math.max(1, Math.floor(stroke.points.length / 10));
+          for (let i = 0; i < stroke.points.length; i += checkEvery) {
+            if (isInsideLasso(stroke.points[i].x, stroke.points[i].y)) {
+              insideCount++;
+            }
+          }
+          const totalChecked = Math.ceil(stroke.points.length / checkEvery);
+          inside = insideCount > totalChecked * 0.3; // 30% threshold
+        }
+
+        if (inside) {
+          removedStrokes.push(stroke);
+          removedIds.push(stroke.id);
+        }
+      }
+
+      if (removedIds.length > 0) {
+        dispatch({ type: 'PUSH_HISTORY', entry: { type: 'remove', pageId: page.id, strokes: removedStrokes } });
+        dispatch({ type: 'REMOVE_STROKES', pageId: page.id, strokeIds: removedIds });
+        const nb = getActiveNotebook();
+        if (nb) persistNotebook(nb);
+      }
+      return;
+    }
+
+    // Default: stroke eraser (remove whole strokes on contact)
+    const eraserRadius = state.strokeStyle.width * 2;
+    const removedStrokes: Stroke[] = [];
+    const removedIds: string[] = [];
+
+    for (const stroke of page.strokes) {
+      let hit = false;
+      for (const ep of points) {
+        if (stroke.shapeData) {
+          if (
+            ep.x >= stroke.bounds.minX - eraserRadius &&
+            ep.x <= stroke.bounds.maxX + eraserRadius &&
+            ep.y >= stroke.bounds.minY - eraserRadius &&
+            ep.y <= stroke.bounds.maxY + eraserRadius
+          ) {
+            hit = true;
+            break;
+          }
+        } else {
+          for (const sp of stroke.points) {
+            const dx = ep.x - sp.x;
+            const dy = ep.y - sp.y;
+            if (dx * dx + dy * dy < eraserRadius * eraserRadius) {
+              hit = true;
+              break;
+            }
+          }
+        }
+        if (hit) break;
+      }
+      if (hit) {
+        removedStrokes.push(stroke);
+        removedIds.push(stroke.id);
+      }
+    }
+
+    if (removedIds.length > 0) {
+      dispatch({ type: 'PUSH_HISTORY', entry: { type: 'remove', pageId: page.id, strokes: removedStrokes } });
+      dispatch({ type: 'REMOVE_STROKES', pageId: page.id, strokeIds: removedIds });
+      const nb = getActiveNotebook();
+      if (nb) persistNotebook(nb);
+    }
+  }, [state.eraserMode, state.strokeStyle.width, getActiveNotebook, dispatch, persistNotebook]);
+
   // ─── Pointer handlers ─────────────────────────────────────
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
@@ -359,12 +641,23 @@ export const Canvas: React.FC = () => {
       return;
     }
 
-    if (isDrawing.current) return;
+    // If we're already drawing with a DIFFERENT pointer, ignore.
+    // But if the SAME pointer re-enters (rapid tap), force-finish the previous stroke.
+    if (isDrawing.current) {
+      if (activePointerId.current !== null && activePointerId.current !== e.pointerId) {
+        return; // different pointer, ignore
+      }
+      // Same pointer or null — force-finish previous stroke so we don't drop this one
+      finishStroke();
+    }
 
     isDrawing.current = true;
     activePointerId.current = e.pointerId;
     currentPoints.current = [];
     lastRenderIndex.current = 0;
+    pixelErasedIds.current.clear();
+    pixelErasedStrokes.current = [];
+    pixelNewStrokes.current = [];
 
     const pos = screenToCanvas(e.clientX, e.clientY);
     const point: Point = {
@@ -390,8 +683,13 @@ export const Canvas: React.FC = () => {
       }
     }
 
+    // Perform real-time pixel erasing on move (for immediate feedback)
+    if (state.activeTool === 'eraser' && state.eraserMode === 'pixel') {
+      performPixelErase(point);
+    }
+
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  }, [state.palmRejection, state.activeTool, screenToCanvas]);
+  }, [state.palmRejection, state.activeTool, state.eraserMode, screenToCanvas, finishStroke, performPixelErase]);
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     // Handle pinch/pan for touch
@@ -495,6 +793,12 @@ export const Canvas: React.FC = () => {
 
     lastPointTime.current = now;
 
+    // ─── Pixel eraser: erase in real-time during drag ───────────
+    if (state.activeTool === 'eraser' && state.eraserMode === 'pixel') {
+      const lastPt = currentPoints.current[currentPoints.current.length - 1];
+      if (lastPt) performPixelErase(lastPt);
+    }
+
     // ─── Schedule live render via rAF (batched for 60fps) ──────
     needsLiveRender.current = true;
     if (!rafId.current) {
@@ -531,7 +835,26 @@ export const Canvas: React.FC = () => {
           octx.restore();
         } else if (state.activeTool === 'eraser') {
           octx.clearRect(0, 0, rect.width, rect.height);
-          // Eraser cursor rendered at last known position
+          // Selection eraser: draw lasso path
+          if (state.eraserMode === 'selection' && currentPoints.current.length > 1) {
+            octx.save();
+            const t = transformRef.current;
+            octx.translate(t.offsetX, t.offsetY);
+            octx.scale(t.scale, t.scale);
+            octx.beginPath();
+            octx.moveTo(currentPoints.current[0].x, currentPoints.current[0].y);
+            for (let i = 1; i < currentPoints.current.length; i++) {
+              octx.lineTo(currentPoints.current[i].x, currentPoints.current[i].y);
+            }
+            octx.closePath();
+            octx.strokeStyle = 'rgba(255, 59, 48, 0.7)';
+            octx.lineWidth = 1.5 / t.scale;
+            octx.setLineDash([6 / t.scale, 4 / t.scale]);
+            octx.stroke();
+            octx.fillStyle = 'rgba(255, 59, 48, 0.08)';
+            octx.fill();
+            octx.restore();
+          }
         } else {
           // Full redraw of live stroke on overlay for smoothness
           octx.clearRect(0, 0, rect.width, rect.height);
@@ -555,7 +878,7 @@ export const Canvas: React.FC = () => {
         }
       });
     }
-  }, [state.palmRejection, state.activeTool, state.activeShape, state.strokeStyle, screenToCanvas, redrawAll]);
+  }, [state.palmRejection, state.activeTool, state.eraserMode, state.activeShape, state.strokeStyle, screenToCanvas, redrawAll, performPixelErase]);
 
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
     // Clean up touch cache
@@ -567,113 +890,9 @@ export const Canvas: React.FC = () => {
 
     if (!isDrawing.current || e.pointerId !== activePointerId.current) return;
 
-    isDrawing.current = false;
-    activePointerId.current = null;
-    predictedPoint.current = null;
-
-    // Cancel pending animation frame
-    if (rafId.current) {
-      cancelAnimationFrame(rafId.current);
-      rafId.current = 0;
-    }
-    needsLiveRender.current = false;
-
-    const page = getActivePage();
-    if (!page) return;
-
-    const points = currentPoints.current;
-    if (points.length === 0) return;
-
-    // Clear overlay
-    const overlay = overlayRef.current;
-    if (overlay) {
-      const octx = overlay.getContext('2d');
-      if (octx) {
-        const rect = overlay.getBoundingClientRect();
-        octx.clearRect(0, 0, rect.width, rect.height);
-      }
-    }
-
-    if (state.activeTool === 'eraser') {
-      // Find strokes that intersect with eraser path
-      const eraserRadius = state.strokeStyle.width * 2;
-      const removedStrokes: Stroke[] = [];
-      const removedIds: string[] = [];
-
-      for (const stroke of page.strokes) {
-        let hit = false;
-        for (const ep of points) {
-          if (stroke.shapeData) {
-            if (
-              ep.x >= stroke.bounds.minX - eraserRadius &&
-              ep.x <= stroke.bounds.maxX + eraserRadius &&
-              ep.y >= stroke.bounds.minY - eraserRadius &&
-              ep.y <= stroke.bounds.maxY + eraserRadius
-            ) {
-              hit = true;
-              break;
-            }
-          } else {
-            for (const sp of stroke.points) {
-              const dx = ep.x - sp.x;
-              const dy = ep.y - sp.y;
-              if (dx * dx + dy * dy < eraserRadius * eraserRadius) {
-                hit = true;
-                break;
-              }
-            }
-          }
-          if (hit) break;
-        }
-        if (hit) {
-          removedStrokes.push(stroke);
-          removedIds.push(stroke.id);
-        }
-      }
-
-      if (removedIds.length > 0) {
-        dispatch({ type: 'PUSH_HISTORY', entry: { type: 'remove', pageId: page.id, strokes: removedStrokes } });
-        dispatch({ type: 'REMOVE_STROKES', pageId: page.id, strokeIds: removedIds });
-        const nb = getActiveNotebook();
-        if (nb) persistNotebook(nb);
-      }
-      return;
-    }
-
-    // Build stroke
-    let shapeData = undefined;
-    if (state.activeTool === 'shape') {
-      const first = points[0];
-      const last = points[points.length - 1];
-      shapeData = ShapeRecognizer.createShape(
-        state.activeShape, first.x, first.y, last.x, last.y
-      );
-    }
-
-    // Compute bounds
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of points) {
-      minX = Math.min(minX, p.x);
-      minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x);
-      maxY = Math.max(maxY, p.y);
-    }
-    const bounds: Bounds = { minX, minY, maxX, maxY };
-
-    const stroke: Stroke = {
-      id: uuid(),
-      points: shapeData ? [] : points,
-      style: { ...state.strokeStyle },
-      bounds,
-      shapeData,
-    };
-
-    dispatch({ type: 'PUSH_HISTORY', entry: { type: 'add', pageId: page.id, strokes: [stroke] } });
-    dispatch({ type: 'ADD_STROKE', pageId: page.id, stroke });
-
-    const nb = getActiveNotebook();
-    if (nb) persistNotebook(nb);
-  }, [state.activeTool, state.activeShape, state.strokeStyle, getActivePage, getActiveNotebook, dispatch, persistNotebook]);
+    // Delegate to finishStroke which handles all tool types
+    finishStroke();
+  }, [finishStroke]);
 
   const handlePointerCancel = useCallback((e: React.PointerEvent) => {
     touchCache.current.delete(e.pointerId);
