@@ -26,19 +26,25 @@ export const Header: React.FC<HeaderProps> = ({ onOpenSidebar, onExportPDF }) =>
           target="_blank"
           rel="noopener noreferrer"
           className="header-brand"
-          title="Powered by OnBuzz"
+          title="Built with OnBuzz by Loxia"
         >
-          <svg className="brand-logo" width="20" height="20" viewBox="0 0 32 32" fill="none">
-            <circle cx="16" cy="16" r="14" fill="url(#onbuzz-grad)" />
-            <defs>
-              <linearGradient id="onbuzz-grad" x1="4" y1="4" x2="28" y2="28">
-                <stop offset="0%" stopColor="#6366F1" />
-                <stop offset="100%" stopColor="#8B5CF6" />
-              </linearGradient>
-            </defs>
-            <text x="16" y="21" textAnchor="middle" fill="white" fontSize="14" fontWeight="bold" fontFamily="-apple-system, sans-serif">O</text>
-          </svg>
-          <span className="brand-text">OnBuzz</span>
+          <img
+            src="/logo.webp"
+            alt="OnBuzz"
+            className="brand-logo-img"
+            width="28"
+            height="28"
+          />
+          <span className="brand-label">
+            <span className="brand-label-top">Built with</span>
+            <img
+              src="/logo-text.webp"
+              alt="OnBuzz"
+              className="brand-text-img"
+              height="14"
+            />
+            <span className="brand-label-bottom">by Loxia</span>
+          </span>
         </a>
       </div>
       <h1 className="header-title">

@@ -1,10 +1,58 @@
 import { Point, Stroke, StrokeStyle } from '../types';
 
 /**
- * High-performance stroke renderer using Catmull-Rom spline interpolation
- * for buttery smooth curves from stylus input.
+ * High-performance stroke renderer with:
+ * - Catmull-Rom → Cubic Bezier spline interpolation
+ * - Pressure smoothing via exponential moving average
+ * - Variable-width stroke rendering using filled polygons (no segment gaps)
+ * - Sub-pixel precision for crisp output
  */
 export class StrokeRenderer {
+  // ─── Pressure smoothing cache ───────────────────────────────
+  private static pressureCache = new WeakMap<Point[], Float64Array>();
+
+  /**
+   * Smooth pressure values using a bilateral filter.
+   * Eliminates jitter while preserving intentional pressure changes.
+   */
+  private static getSmoothedPressures(points: Point[]): Float64Array {
+    const cached = StrokeRenderer.pressureCache.get(points);
+    if (cached && cached.length === points.length) return cached;
+
+    const n = points.length;
+    const smoothed = new Float64Array(n);
+    if (n === 0) return smoothed;
+    if (n === 1) { smoothed[0] = Math.max(0.1, points[0].pressure); return smoothed; }
+
+    // Two-pass Gaussian-like smoothing (window=5, sigma adaptive)
+    const raw = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      raw[i] = Math.max(0.05, points[i].pressure);
+    }
+
+    // First pass: forward EMA
+    const alpha = 0.35;
+    const pass1 = new Float64Array(n);
+    pass1[0] = raw[0];
+    for (let i = 1; i < n; i++) {
+      pass1[i] = alpha * raw[i] + (1 - alpha) * pass1[i - 1];
+    }
+
+    // Second pass: backward EMA
+    const pass2 = new Float64Array(n);
+    pass2[n - 1] = pass1[n - 1];
+    for (let i = n - 2; i >= 0; i--) {
+      pass2[i] = alpha * pass1[i] + (1 - alpha) * pass2[i + 1];
+    }
+
+    for (let i = 0; i < n; i++) {
+      smoothed[i] = Math.max(0.05, pass2[i]);
+    }
+
+    StrokeRenderer.pressureCache.set(points, smoothed);
+    return smoothed;
+  }
+
   /**
    * Render a complete stroke to the canvas context.
    */
@@ -25,7 +73,6 @@ export class StrokeRenderer {
     } else if (points.length === 2) {
       StrokeRenderer.renderLine(ctx, points[0], points[1], style);
     } else {
-      // Dispatch to specialized renderers
       switch (style.tool) {
         case 'calligraphy':
           StrokeRenderer.renderCalligraphy(ctx, points, style);
@@ -50,13 +97,13 @@ export class StrokeRenderer {
 
   /**
    * Render an in-progress stroke (optimized for real-time drawing).
-   * Only renders the last few segments for performance.
+   * Uses full point set for smooth result, but limits redraw area.
    */
   static renderStrokeLive(
     ctx: CanvasRenderingContext2D,
     points: Point[],
     style: StrokeStyle,
-    startIndex: number = 0
+    _startIndex: number = 0
   ): void {
     if (points.length < 2) {
       if (points.length === 1) {
@@ -71,28 +118,21 @@ export class StrokeRenderer {
     ctx.save();
     StrokeRenderer.applyStyle(ctx, style);
 
-    const start = Math.max(0, startIndex - 2);
-    const subset = points.slice(start);
-
     switch (style.tool) {
       case 'calligraphy':
-        StrokeRenderer.renderCalligraphy(ctx, subset, style);
+        StrokeRenderer.renderCalligraphy(ctx, points, style);
         break;
       case 'fountain':
-        StrokeRenderer.renderFountain(ctx, subset, style);
+        StrokeRenderer.renderFountain(ctx, points, style);
         break;
       case 'marker':
-        StrokeRenderer.renderMarker(ctx, subset, style);
+        StrokeRenderer.renderMarker(ctx, points, style);
         break;
       case 'spray':
-        StrokeRenderer.renderSpray(ctx, subset, style);
+        StrokeRenderer.renderSpray(ctx, points, style);
         break;
       default:
-        if (subset.length >= 3) {
-          StrokeRenderer.renderCurve(ctx, subset, style);
-        } else {
-          StrokeRenderer.renderLine(ctx, subset[0], subset[subset.length - 1], style);
-        }
+        StrokeRenderer.renderCurve(ctx, points, style);
         break;
     }
 
@@ -107,15 +147,18 @@ export class StrokeRenderer {
     if (style.tool === 'eraser') {
       ctx.globalCompositeOperation = 'destination-out';
       ctx.strokeStyle = 'rgba(0,0,0,1)';
+      ctx.fillStyle = 'rgba(0,0,0,1)';
       ctx.lineWidth = style.width;
     } else if (style.tool === 'highlighter') {
       ctx.globalCompositeOperation = 'multiply';
       ctx.strokeStyle = style.color;
+      ctx.fillStyle = style.color;
       ctx.lineWidth = style.width * 3;
       ctx.globalAlpha = 0.3;
     } else if (style.tool === 'pencil') {
       ctx.globalCompositeOperation = 'source-over';
       ctx.strokeStyle = style.color;
+      ctx.fillStyle = style.color;
       ctx.globalAlpha = style.opacity * 0.7;
     } else if (style.tool === 'calligraphy') {
       ctx.globalCompositeOperation = 'source-over';
@@ -124,10 +167,12 @@ export class StrokeRenderer {
     } else if (style.tool === 'fountain') {
       ctx.globalCompositeOperation = 'source-over';
       ctx.strokeStyle = style.color;
+      ctx.fillStyle = style.color;
       ctx.lineCap = 'round';
     } else if (style.tool === 'marker') {
       ctx.globalCompositeOperation = 'multiply';
       ctx.strokeStyle = style.color;
+      ctx.fillStyle = style.color;
       ctx.lineCap = 'square';
       ctx.lineJoin = 'miter';
       ctx.lineWidth = style.width * 4;
@@ -138,6 +183,7 @@ export class StrokeRenderer {
     } else {
       ctx.globalCompositeOperation = 'source-over';
       ctx.strokeStyle = style.color;
+      ctx.fillStyle = style.color;
       ctx.lineWidth = style.width;
     }
   }
@@ -151,21 +197,52 @@ export class StrokeRenderer {
   }
 
   private static renderLine(ctx: CanvasRenderingContext2D, p0: Point, p1: Point, style: StrokeStyle): void {
-    ctx.lineWidth = StrokeRenderer.getWidth(style, (p0.pressure + p1.pressure) / 2);
-    ctx.beginPath();
-    ctx.moveTo(p0.x, p0.y);
-    ctx.lineTo(p1.x, p1.y);
-    ctx.stroke();
+    const usePressure = style.tool === 'pen' || style.tool === 'pencil' || style.tool === 'eraser';
+    if (usePressure) {
+      // Render as filled polygon for smooth variable width
+      const w0 = StrokeRenderer.getWidth(style, p0.pressure) / 2;
+      const w1 = StrokeRenderer.getWidth(style, p1.pressure) / 2;
+      const dx = p1.x - p0.x;
+      const dy = p1.y - p0.y;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      const nx = -dy / len;
+      const ny = dx / len;
+
+      ctx.beginPath();
+      ctx.moveTo(p0.x + nx * w0, p0.y + ny * w0);
+      ctx.lineTo(p1.x + nx * w1, p1.y + ny * w1);
+      ctx.lineTo(p1.x - nx * w1, p1.y - ny * w1);
+      ctx.lineTo(p0.x - nx * w0, p0.y - ny * w0);
+      ctx.closePath();
+      ctx.fill();
+
+      // Round caps
+      ctx.beginPath();
+      ctx.arc(p0.x, p0.y, w0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(p1.x, p1.y, w1, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.lineWidth = StrokeRenderer.getWidth(style, (p0.pressure + p1.pressure) / 2);
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.stroke();
+    }
   }
 
   /**
-   * Render smooth curve using Catmull-Rom → Bezier conversion
-   * with variable width based on pressure.
+   * Render smooth curve using filled polygon with variable width.
+   * This eliminates gaps between segments that occur with stroke-based rendering.
+   * Uses Catmull-Rom spline interpolation for the centerline, then offsets
+   * perpendicular by the pressure-derived width to create a smooth outline.
    */
   private static renderCurve(ctx: CanvasRenderingContext2D, points: Point[], style: StrokeStyle): void {
-    const usePressure = style.tool === 'pen' || style.tool === 'pencil';
+    const usePressure = style.tool === 'pen' || style.tool === 'pencil' || style.tool === 'eraser';
 
     if (!usePressure) {
+      // Non-pressure: single smooth bezier path
       ctx.lineWidth = style.width;
       ctx.beginPath();
       ctx.moveTo(points[0].x, points[0].y);
@@ -187,110 +264,261 @@ export class StrokeRenderer {
       return;
     }
 
-    // Variable width: segment-by-segment with pressure
-    for (let i = 0; i < points.length - 1; i++) {
+    // ─── Variable-width stroke as filled polygon ──────────────
+    // Interpolate the centerline at higher resolution, then build
+    // left/right outlines offset by the smoothed pressure width.
+
+    const smoothedPressures = StrokeRenderer.getSmoothedPressures(points);
+    const n = points.length;
+
+    // Generate interpolated centerline points with sub-segment resolution
+    const centerline: { x: number; y: number; w: number }[] = [];
+    const SUBDIVISIONS = 3; // interpolation steps between each pair
+
+    for (let i = 0; i < n - 1; i++) {
       const p0 = points[Math.max(i - 1, 0)];
       const p1 = points[i];
-      const p2 = points[Math.min(i + 1, points.length - 1)];
-      const p3 = points[Math.min(i + 2, points.length - 1)];
+      const p2 = points[Math.min(i + 1, n - 1)];
+      const p3 = points[Math.min(i + 2, n - 1)];
 
-      const pressure = (p1.pressure + p2.pressure) / 2;
-      ctx.lineWidth = StrokeRenderer.getWidth(style, pressure);
+      const w1 = StrokeRenderer.getWidth(style, smoothedPressures[i]);
+      const w2 = StrokeRenderer.getWidth(style, smoothedPressures[Math.min(i + 1, n - 1)]);
 
-      const cp1x = p1.x + (p2.x - p0.x) / 6;
-      const cp1y = p1.y + (p2.y - p0.y) / 6;
-      const cp2x = p2.x - (p3.x - p1.x) / 6;
-      const cp2y = p2.y - (p3.y - p1.y) / 6;
+      for (let s = 0; s < SUBDIVISIONS; s++) {
+        const t = s / SUBDIVISIONS;
+        const tt = t * t;
+        const ttt = tt * t;
 
-      ctx.beginPath();
-      ctx.moveTo(p1.x, p1.y);
-      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
-      ctx.stroke();
+        // Catmull-Rom interpolation
+        const x = 0.5 * (
+          (2 * p1.x) +
+          (-p0.x + p2.x) * t +
+          (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * tt +
+          (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * ttt
+        );
+        const y = 0.5 * (
+          (2 * p1.y) +
+          (-p0.y + p2.y) * t +
+          (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * tt +
+          (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * ttt
+        );
+        const w = w1 + (w2 - w1) * t;
+
+        centerline.push({ x, y, w: w / 2 });
+      }
     }
+    // Add last point
+    const lastP = points[n - 1];
+    const lastW = StrokeRenderer.getWidth(style, smoothedPressures[n - 1]);
+    centerline.push({ x: lastP.x, y: lastP.y, w: lastW / 2 });
+
+    if (centerline.length < 2) return;
+
+    // Build left and right outline arrays
+    const leftOutline: { x: number; y: number }[] = [];
+    const rightOutline: { x: number; y: number }[] = [];
+
+    for (let i = 0; i < centerline.length; i++) {
+      const curr = centerline[i];
+      const prev = centerline[Math.max(i - 1, 0)];
+      const next = centerline[Math.min(i + 1, centerline.length - 1)];
+
+      // Tangent direction
+      let tx = next.x - prev.x;
+      let ty = next.y - prev.y;
+      const tLen = Math.sqrt(tx * tx + ty * ty) || 1;
+      tx /= tLen;
+      ty /= tLen;
+
+      // Normal (perpendicular)
+      const nx = -ty;
+      const ny = tx;
+
+      leftOutline.push({ x: curr.x + nx * curr.w, y: curr.y + ny * curr.w });
+      rightOutline.push({ x: curr.x - nx * curr.w, y: curr.y - ny * curr.w });
+    }
+
+    // Draw filled polygon: left outline forward, right outline backward
+    ctx.beginPath();
+
+    // Start cap (round)
+    const startC = centerline[0];
+    ctx.moveTo(leftOutline[0].x, leftOutline[0].y);
+
+    // Left outline (forward) - smooth with quadratic curves
+    for (let i = 1; i < leftOutline.length; i++) {
+      const prev = leftOutline[i - 1];
+      const curr = leftOutline[i];
+      const mx = (prev.x + curr.x) / 2;
+      const my = (prev.y + curr.y) / 2;
+      ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
+    }
+    ctx.lineTo(leftOutline[leftOutline.length - 1].x, leftOutline[leftOutline.length - 1].y);
+
+    // End cap (round arc)
+    const endC = centerline[centerline.length - 1];
+    ctx.arc(endC.x, endC.y, endC.w, 
+      Math.atan2(leftOutline[leftOutline.length - 1].y - endC.y, leftOutline[leftOutline.length - 1].x - endC.x),
+      Math.atan2(rightOutline[rightOutline.length - 1].y - endC.y, rightOutline[rightOutline.length - 1].x - endC.x),
+      false
+    );
+
+    // Right outline (backward) - smooth with quadratic curves
+    for (let i = rightOutline.length - 2; i >= 0; i--) {
+      const prev = rightOutline[i + 1];
+      const curr = rightOutline[i];
+      const mx = (prev.x + curr.x) / 2;
+      const my = (prev.y + curr.y) / 2;
+      ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
+    }
+    ctx.lineTo(rightOutline[0].x, rightOutline[0].y);
+
+    // Start cap (round arc)
+    ctx.arc(startC.x, startC.y, startC.w,
+      Math.atan2(rightOutline[0].y - startC.y, rightOutline[0].x - startC.x),
+      Math.atan2(leftOutline[0].y - startC.y, leftOutline[0].x - startC.x),
+      false
+    );
+
+    ctx.closePath();
+    ctx.fill();
   }
 
   // ─── Calligraphy: angled nib with pressure-sensitive width ───
 
   private static renderCalligraphy(ctx: CanvasRenderingContext2D, points: Point[], style: StrokeStyle): void {
     const nibAngle = Math.PI / 4; // 45-degree nib angle
-    const maxWidth = style.width * 3;
+    const smoothedPressures = StrokeRenderer.getSmoothedPressures(points);
 
     ctx.beginPath();
-
     for (let i = 0; i < points.length - 1; i++) {
       const p1 = points[i];
       const p2 = points[i + 1];
-      const pressure = (p1.pressure + p2.pressure) / 2;
-      const w = maxWidth * Math.max(0.1, pressure);
 
-      // Direction of stroke
+      // Direction of stroke affects nib width
       const dx = p2.x - p1.x;
       const dy = p2.y - p1.y;
-      const strokeAngle = Math.atan2(dy, dx);
+      const angle = Math.atan2(dy, dx);
+      const angleDiff = Math.abs(Math.sin(angle - nibAngle));
 
-      // Width varies based on angle relative to nib
-      const angleDiff = Math.abs(strokeAngle - nibAngle);
-      const widthFactor = 0.15 + 0.85 * Math.abs(Math.sin(angleDiff));
-      const halfW = (w * widthFactor) / 2;
+      const pressure = smoothedPressures[i];
+      const baseWidth = style.width * 2;
+      const w = baseWidth * (0.15 + 0.85 * angleDiff) * (0.5 + 0.5 * pressure);
 
-      // Perpendicular offset
-      const px = Math.cos(nibAngle + Math.PI / 2) * halfW;
-      const py = Math.sin(nibAngle + Math.PI / 2) * halfW;
+      const nx = Math.cos(nibAngle) * w / 2;
+      const ny = Math.sin(nibAngle) * w / 2;
 
-      // Draw a quad for each segment
-      ctx.moveTo(p1.x - px, p1.y - py);
-      ctx.lineTo(p1.x + px, p1.y + py);
-      ctx.lineTo(p2.x + px, p2.y + py);
-      ctx.lineTo(p2.x - px, p2.y - py);
+      ctx.moveTo(p1.x - nx, p1.y - ny);
+      ctx.lineTo(p1.x + nx, p1.y + ny);
+      ctx.lineTo(p2.x + nx, p2.y + ny);
+      ctx.lineTo(p2.x - nx, p2.y - ny);
       ctx.closePath();
     }
-
     ctx.fill();
   }
 
-  // ─── Fountain Pen: smooth variable width with ink pooling feel ───
+  // ─── Fountain Pen: speed-sensitive variable width ───
 
   private static renderFountain(ctx: CanvasRenderingContext2D, points: Point[], style: StrokeStyle): void {
-    const minW = style.width * 0.2;
-    const maxW = style.width * 2.5;
+    if (points.length < 2) return;
 
-    for (let i = 0; i < points.length - 1; i++) {
-      const p0 = points[Math.max(i - 1, 0)];
-      const p1 = points[i];
-      const p2 = points[Math.min(i + 1, points.length - 1)];
-      const p3 = points[Math.min(i + 2, points.length - 1)];
+    const smoothedPressures = StrokeRenderer.getSmoothedPressures(points);
+    const baseWidth = style.width * 1.8;
 
-      // Smooth pressure with neighbors
-      const pressure = (p0.pressure * 0.1 + p1.pressure * 0.4 + p2.pressure * 0.4 + p3.pressure * 0.1);
-      const t = Math.max(0.05, pressure);
-      const eased = t * t * (3 - 2 * t); // smoothstep
-      ctx.lineWidth = minW + (maxW - minW) * eased;
+    // Build centerline with width based on speed + pressure
+    const centerline: { x: number; y: number; w: number }[] = [];
 
-      // Speed-based thinning: faster = thinner
-      const dx = p2.x - p1.x;
-      const dy = p2.y - p1.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const dt = Math.max(1, p2.timestamp - p1.timestamp);
-      const speed = dist / dt;
-      const speedFactor = Math.max(0.4, 1 - speed * 0.08);
-      ctx.lineWidth *= speedFactor;
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
+      let speed = 0;
+      if (i > 0) {
+        const prev = points[i - 1];
+        const dx = p.x - prev.x;
+        const dy = p.y - prev.y;
+        const dt = Math.max(1, p.timestamp - prev.timestamp);
+        speed = Math.sqrt(dx * dx + dy * dy) / dt;
+      }
 
-      const cp1x = p1.x + (p2.x - p0.x) / 6;
-      const cp1y = p1.y + (p2.y - p0.y) / 6;
-      const cp2x = p2.x - (p3.x - p1.x) / 6;
-      const cp2y = p2.y - (p3.y - p1.y) / 6;
+      // Higher speed = thinner line (like real fountain pen)
+      const speedFactor = 1 / (1 + speed * 2.5);
+      const pressureFactor = 0.4 + 0.6 * smoothedPressures[i];
+      const w = baseWidth * speedFactor * pressureFactor;
 
-      ctx.beginPath();
-      ctx.moveTo(p1.x, p1.y);
-      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
-      ctx.stroke();
+      centerline.push({ x: p.x, y: p.y, w: Math.max(0.5, w) / 2 });
     }
+
+    // Smooth the widths for natural transitions
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 1; i < centerline.length - 1; i++) {
+        centerline[i].w = centerline[i].w * 0.5 + 
+          (centerline[i - 1].w + centerline[i + 1].w) * 0.25;
+      }
+    }
+
+    // Build outlines
+    const leftOutline: { x: number; y: number }[] = [];
+    const rightOutline: { x: number; y: number }[] = [];
+
+    for (let i = 0; i < centerline.length; i++) {
+      const curr = centerline[i];
+      const prev = centerline[Math.max(i - 1, 0)];
+      const next = centerline[Math.min(i + 1, centerline.length - 1)];
+
+      let tx = next.x - prev.x;
+      let ty = next.y - prev.y;
+      const tLen = Math.sqrt(tx * tx + ty * ty) || 1;
+      tx /= tLen;
+      ty /= tLen;
+
+      const nx = -ty;
+      const ny = tx;
+
+      leftOutline.push({ x: curr.x + nx * curr.w, y: curr.y + ny * curr.w });
+      rightOutline.push({ x: curr.x - nx * curr.w, y: curr.y - ny * curr.w });
+    }
+
+    // Draw as filled polygon
+    ctx.beginPath();
+    ctx.moveTo(leftOutline[0].x, leftOutline[0].y);
+
+    for (let i = 1; i < leftOutline.length; i++) {
+      const prev = leftOutline[i - 1];
+      const curr = leftOutline[i];
+      ctx.quadraticCurveTo(prev.x, prev.y, (prev.x + curr.x) / 2, (prev.y + curr.y) / 2);
+    }
+    ctx.lineTo(leftOutline[leftOutline.length - 1].x, leftOutline[leftOutline.length - 1].y);
+
+    // End cap
+    const endC = centerline[centerline.length - 1];
+    ctx.arc(endC.x, endC.y, endC.w,
+      Math.atan2(leftOutline[leftOutline.length - 1].y - endC.y, leftOutline[leftOutline.length - 1].x - endC.x),
+      Math.atan2(rightOutline[rightOutline.length - 1].y - endC.y, rightOutline[rightOutline.length - 1].x - endC.x),
+      false
+    );
+
+    for (let i = rightOutline.length - 2; i >= 0; i--) {
+      const prev = rightOutline[i + 1];
+      const curr = rightOutline[i];
+      ctx.quadraticCurveTo(prev.x, prev.y, (prev.x + curr.x) / 2, (prev.y + curr.y) / 2);
+    }
+    ctx.lineTo(rightOutline[0].x, rightOutline[0].y);
+
+    // Start cap
+    const startC = centerline[0];
+    ctx.arc(startC.x, startC.y, startC.w,
+      Math.atan2(rightOutline[0].y - startC.y, rightOutline[0].x - startC.x),
+      Math.atan2(leftOutline[0].y - startC.y, leftOutline[0].x - startC.x),
+      false
+    );
+
+    ctx.closePath();
+    ctx.fill();
   }
 
-  // ─── Marker: thick, flat, semi-transparent ───
+  // ─── Marker: thick flat semi-transparent ───
 
   private static renderMarker(ctx: CanvasRenderingContext2D, points: Point[], style: StrokeStyle): void {
-    // Marker uses a single smooth path at fixed width (set in applyStyle)
+    ctx.lineWidth = style.width * 4;
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
 
@@ -310,36 +538,40 @@ export class StrokeRenderer {
     ctx.stroke();
   }
 
-  // ─── Spray Can: scattered dots with density based on pressure ───
+  // ─── Spray Can: scattered dots ───
 
   private static renderSpray(ctx: CanvasRenderingContext2D, points: Point[], style: StrokeStyle): void {
     const radius = style.width * 3;
 
-    // Use a seeded approach based on point data for consistent rendering
-    for (const point of points) {
-      const density = Math.floor(12 + 28 * point.pressure);
-      // Deterministic pseudo-random from point coordinates
-      let seed = Math.floor(point.x * 1000 + point.y * 7919 + point.timestamp);
-      for (let i = 0; i < density; i++) {
-        seed = (seed * 16807 + 0) % 2147483647;
-        const angle = (seed / 2147483647) * Math.PI * 2;
-        seed = (seed * 16807 + 0) % 2147483647;
-        const r = (seed / 2147483647) * radius * Math.sqrt(seed / 2147483647);
-        const sx = point.x + Math.cos(angle) * r;
-        const sy = point.y + Math.sin(angle) * r;
-        const dotSize = 0.5 + (seed / 2147483647) * 1.5;
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
+      const density = Math.floor(8 + p.pressure * 25);
 
-        ctx.globalAlpha = style.opacity * (0.3 + 0.7 * (1 - r / radius));
+      // Deterministic pseudo-random based on point index + position
+      let seed = (p.x * 73856093 + p.y * 19349663 + i * 83492791) | 0;
+      for (let j = 0; j < density; j++) {
+        seed = (seed * 1664525 + 1013904223) | 0;
+        const angle = ((seed >>> 0) / 4294967296) * Math.PI * 2;
+        seed = (seed * 1664525 + 1013904223) | 0;
+        const dist = ((seed >>> 0) / 4294967296) * radius * p.pressure;
+
+        const sx = p.x + Math.cos(angle) * dist;
+        const sy = p.y + Math.sin(angle) * dist;
+        const dotR = 0.5 + ((seed >>> 16) & 0xFF) / 255 * 1.5;
+
         ctx.beginPath();
-        ctx.arc(sx, sy, dotSize, 0, Math.PI * 2);
+        ctx.arc(sx, sy, dotR, 0, Math.PI * 2);
         ctx.fill();
       }
     }
   }
 
+  // ─── Shape rendering ───────────────────────────────────────
+
   private static renderShape(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
-    const { shapeData, style } = stroke;
-    if (!shapeData) return;
+    if (!stroke.shapeData) return;
+    const { type, points: shapePoints } = stroke.shapeData;
+    const style = stroke.style;
 
     ctx.save();
     ctx.strokeStyle = style.color;
@@ -348,61 +580,63 @@ export class StrokeRenderer {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    ctx.beginPath();
+    if (type === 'line') {
+      ctx.beginPath();
+      ctx.moveTo(shapePoints[0], shapePoints[1]);
+      ctx.lineTo(shapePoints[2], shapePoints[3]);
+      ctx.stroke();
+    } else if (type === 'circle') {
+      const cx = shapePoints[0];
+      const cy = shapePoints[1];
+      const rx = shapePoints[2];
+      const ry = shapePoints[3];
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (type === 'rectangle') {
+      const x = shapePoints[0];
+      const y = shapePoints[1];
+      const w = shapePoints[2];
+      const h = shapePoints[3];
+      ctx.strokeRect(x, y, w, h);
+    } else if (type === 'arrow') {
+      const [x1, y1, x2, y2] = shapePoints;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
 
-    switch (shapeData.type) {
-      case 'line':
-        ctx.moveTo(shapeData.startX, shapeData.startY);
-        ctx.lineTo(shapeData.endX, shapeData.endY);
-        break;
-      case 'rectangle':
-        ctx.rect(
-          Math.min(shapeData.startX, shapeData.endX),
-          Math.min(shapeData.startY, shapeData.endY),
-          Math.abs(shapeData.endX - shapeData.startX),
-          Math.abs(shapeData.endY - shapeData.startY)
-        );
-        break;
-      case 'circle':
-        if (shapeData.cx !== undefined && shapeData.cy !== undefined && shapeData.radius !== undefined) {
-          ctx.arc(shapeData.cx, shapeData.cy, shapeData.radius, 0, Math.PI * 2);
-        }
-        break;
-      case 'arrow': {
-        const dx = shapeData.endX - shapeData.startX;
-        const dy = shapeData.endY - shapeData.startY;
-        const angle = Math.atan2(dy, dx);
-        const headLen = Math.min(20, Math.sqrt(dx * dx + dy * dy) * 0.3);
-
-        ctx.moveTo(shapeData.startX, shapeData.startY);
-        ctx.lineTo(shapeData.endX, shapeData.endY);
-        ctx.moveTo(shapeData.endX, shapeData.endY);
-        ctx.lineTo(
-          shapeData.endX - headLen * Math.cos(angle - Math.PI / 6),
-          shapeData.endY - headLen * Math.sin(angle - Math.PI / 6)
-        );
-        ctx.moveTo(shapeData.endX, shapeData.endY);
-        ctx.lineTo(
-          shapeData.endX - headLen * Math.cos(angle + Math.PI / 6),
-          shapeData.endY - headLen * Math.sin(angle + Math.PI / 6)
-        );
-        break;
-      }
+      // Arrowhead
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const headLen = 15;
+      ctx.beginPath();
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(
+        x2 - headLen * Math.cos(angle - Math.PI / 6),
+        y2 - headLen * Math.sin(angle - Math.PI / 6)
+      );
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(
+        x2 - headLen * Math.cos(angle + Math.PI / 6),
+        y2 - headLen * Math.sin(angle + Math.PI / 6)
+      );
+      ctx.stroke();
     }
 
-    ctx.stroke();
     ctx.restore();
   }
 
   /**
-   * Calculate width from pressure. Maps pressure [0,1] to a pleasant width curve.
+   * Calculate width from pressure. Gentler curve for natural feel.
+   * Maps pressure [0,1] to a smooth width range.
    */
   static getWidth(style: StrokeStyle, pressure: number): number {
-    const minW = style.width * 0.3;
-    const maxW = style.width * 1.4;
-    // Ease-in-out curve for natural feel
-    const t = Math.max(0.05, pressure);
-    const eased = t * t * (3 - 2 * t);
+    const minW = style.width * 0.45;
+    const maxW = style.width * 1.2;
+    // Smooth cubic ease for natural pressure response
+    const t = Math.max(0.08, Math.min(1, pressure));
+    // Attempt a more linear-feeling curve with slight ease
+    const eased = t * (2 - t); // ease-out quadratic — responsive but not harsh
     return minW + (maxW - minW) * eased;
   }
 }

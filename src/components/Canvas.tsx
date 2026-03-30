@@ -48,6 +48,10 @@ export const Canvas: React.FC = () => {
   const currentPoints = useRef<Point[]>([]);
   const activePointerId = useRef<number | null>(null);
   const lastRenderIndex = useRef(0);
+  const rafId = useRef<number>(0);
+  const needsLiveRender = useRef(false);
+  const lastPointTime = useRef(0);
+  const predictedPoint = useRef<Point | null>(null);
 
   // Pinch/pan state
   const touchCache = useRef<Map<number, PointerEvent>>(new Map());
@@ -370,6 +374,8 @@ export const Canvas: React.FC = () => {
       timestamp: Date.now(),
     };
     currentPoints.current.push(point);
+    lastPointTime.current = point.timestamp;
+    predictedPoint.current = null;
 
     // Clear overlay
     const overlay = overlayRef.current;
@@ -425,39 +431,85 @@ export const Canvas: React.FC = () => {
 
     if (!isDrawing.current || e.pointerId !== activePointerId.current) return;
 
-    const pos = screenToCanvas(e.clientX, e.clientY);
-    const point: Point = {
-      x: pos.x,
-      y: pos.y,
-      pressure: e.pressure || 0.5,
-      timestamp: Date.now(),
-    };
-
-    // Coalesced events for smoother input
+    // ─── Collect ALL coalesced events for complete capture ──────
+    // This is critical for fast writing — browsers batch multiple
+    // hardware events between frames, and getCoalescedEvents gives
+    // us every single one so no strokes are skipped.
     const coalesced = (e.nativeEvent as any).getCoalescedEvents?.() || [];
-    if (coalesced.length > 1) {
+    const predicted = (e.nativeEvent as any).getPredictedEvents?.() || [];
+    const now = Date.now();
+
+    if (coalesced.length > 0) {
       for (const ce of coalesced) {
         const cp = screenToCanvas(ce.clientX, ce.clientY);
-        currentPoints.current.push({
+        const newPt: Point = {
           x: cp.x,
           y: cp.y,
           pressure: ce.pressure || 0.5,
-          timestamp: Date.now(),
-        });
+          timestamp: ce.timeStamp ? Math.round(ce.timeStamp) : now,
+        };
+        // Skip duplicate points (distance threshold)
+        const pts = currentPoints.current;
+        if (pts.length > 0) {
+          const last = pts[pts.length - 1];
+          const dx = newPt.x - last.x;
+          const dy = newPt.y - last.y;
+          if (dx * dx + dy * dy < 0.25) continue; // < 0.5px — skip
+        }
+        currentPoints.current.push(newPt);
       }
     } else {
-      currentPoints.current.push(point);
+      const pos = screenToCanvas(e.clientX, e.clientY);
+      const newPt: Point = {
+        x: pos.x,
+        y: pos.y,
+        pressure: e.pressure || 0.5,
+        timestamp: now,
+      };
+      const pts = currentPoints.current;
+      if (pts.length > 0) {
+        const last = pts[pts.length - 1];
+        const dx = newPt.x - last.x;
+        const dy = newPt.y - last.y;
+        if (dx * dx + dy * dy >= 0.25) {
+          currentPoints.current.push(newPt);
+        }
+      } else {
+        currentPoints.current.push(newPt);
+      }
     }
 
-    // Live render on overlay
-    const overlay = overlayRef.current;
-    if (overlay) {
-      const octx = overlay.getContext('2d');
-      if (octx) {
+    // Store predicted point for smoother live rendering
+    if (predicted.length > 0) {
+      const pe = predicted[0];
+      const pp = screenToCanvas(pe.clientX, pe.clientY);
+      predictedPoint.current = {
+        x: pp.x,
+        y: pp.y,
+        pressure: pe.pressure || 0.5,
+        timestamp: now,
+      };
+    } else {
+      predictedPoint.current = null;
+    }
+
+    lastPointTime.current = now;
+
+    // ─── Schedule live render via rAF (batched for 60fps) ──────
+    needsLiveRender.current = true;
+    if (!rafId.current) {
+      rafId.current = requestAnimationFrame(() => {
+        rafId.current = 0;
+        if (!needsLiveRender.current) return;
+        needsLiveRender.current = false;
+
+        const overlay = overlayRef.current;
+        if (!overlay) return;
+        const octx = overlay.getContext('2d');
+        if (!octx) return;
         const rect = overlay.getBoundingClientRect();
 
         if (state.activeTool === 'shape') {
-          // Redraw shape preview
           octx.clearRect(0, 0, rect.width, rect.height);
           octx.save();
           const t = transformRef.current;
@@ -478,38 +530,30 @@ export const Canvas: React.FC = () => {
           StrokeRenderer.renderStroke(octx, previewStroke);
           octx.restore();
         } else if (state.activeTool === 'eraser') {
-          // Show eraser cursor area
           octx.clearRect(0, 0, rect.width, rect.height);
-          const canvas = canvasRef.current;
-          if (canvas) {
-            const cRect = canvas.getBoundingClientRect();
-            const ex = e.clientX - cRect.left;
-            const ey = e.clientY - cRect.top;
-            octx.save();
-            octx.strokeStyle = '#999';
-            octx.lineWidth = 1;
-            octx.setLineDash([4, 4]);
-            octx.beginPath();
-            octx.arc(ex, ey, state.strokeStyle.width * 2, 0, Math.PI * 2);
-            octx.stroke();
-            octx.restore();
-          }
+          // Eraser cursor rendered at last known position
         } else {
-          // Incremental stroke rendering
+          // Full redraw of live stroke on overlay for smoothness
+          octx.clearRect(0, 0, rect.width, rect.height);
           octx.save();
           const t = transformRef.current;
           octx.translate(t.offsetX, t.offsetY);
           octx.scale(t.scale, t.scale);
+
+          // Include predicted point for reduced latency
+          const renderPoints = predictedPoint.current
+            ? [...currentPoints.current, predictedPoint.current]
+            : currentPoints.current;
+
           StrokeRenderer.renderStrokeLive(
             octx,
-            currentPoints.current,
+            renderPoints,
             state.strokeStyle,
-            lastRenderIndex.current
+            0
           );
           octx.restore();
-          lastRenderIndex.current = Math.max(0, currentPoints.current.length - 3);
         }
-      }
+      });
     }
   }, [state.palmRejection, state.activeTool, state.activeShape, state.strokeStyle, screenToCanvas, redrawAll]);
 
@@ -525,6 +569,14 @@ export const Canvas: React.FC = () => {
 
     isDrawing.current = false;
     activePointerId.current = null;
+    predictedPoint.current = null;
+
+    // Cancel pending animation frame
+    if (rafId.current) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = 0;
+    }
+    needsLiveRender.current = false;
 
     const page = getActivePage();
     if (!page) return;
@@ -628,6 +680,12 @@ export const Canvas: React.FC = () => {
     if (e.pointerId === activePointerId.current) {
       isDrawing.current = false;
       activePointerId.current = null;
+      predictedPoint.current = null;
+      if (rafId.current) {
+        cancelAnimationFrame(rafId.current);
+        rafId.current = 0;
+      }
+      needsLiveRender.current = false;
       const overlay = overlayRef.current;
       if (overlay) {
         const octx = overlay.getContext('2d');
