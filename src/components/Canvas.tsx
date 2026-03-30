@@ -349,12 +349,11 @@ export const Canvas: React.FC = () => {
 
       // Draw selection handles if selected
       if (selId === img.id) {
-        if (img.rotation !== 0 && ctx.getTransform) {
-          // Already translated/rotated
-        } else {
+        if (img.rotation === 0) {
+          // Image was drawn without translate/rotate, so set up transform for handles
           ctx.translate(cx, cy);
-          ctx.rotate((img.rotation * Math.PI) / 180);
         }
+        // If rotation !== 0, context is already translated+rotated from drawing above
         const hw = img.width / 2;
         const hh = img.height / 2;
 
