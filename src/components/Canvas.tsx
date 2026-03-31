@@ -1081,6 +1081,13 @@ export const Canvas: React.FC = () => {
       return;
     }
 
+    // Filter hover events: Apple Pencil fires pointerMove with buttons=0 when
+    // hovering above the screen (not touching). These must never add points or
+    // adopt a new pointer ID — they are NOT drawing events.
+    // e.buttons === 0 means no button/stylus contact. e.buttons === 1 means
+    // the primary button (stylus tip touching screen) is active.
+    if (e.pointerType === 'pen' && e.buttons === 0) return;
+
     // If we're drawing but the pointer ID changed mid-stroke (iPad OS can reassign
     // pointer IDs between pointerDown and pointerMove for the Apple Pencil),
     // adopt the new pointer ID instead of silently dropping all subsequent events.
