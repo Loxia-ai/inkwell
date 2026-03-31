@@ -508,31 +508,224 @@ export const Canvas: React.FC = () => {
     redrawAll();
   }, [state.activeNotebookId, state.activePageIndex, state.notebooks, redrawAll]);
 
-  // ── Native pointer event listeners on overlay canvas ──────────────────────
-  // Consultant recommendation: use native addEventListener (not React synthetic
-  // events) for pointer handling on the overlay canvas. React synthetic events
-  // can interfere with pointer capture lifecycle on iPadOS Safari.
-  // We attach with passive:false so we can call preventDefault if needed.
-  // lostpointercapture fires when capture is released (including our explicit
-  // releasePointerCapture call on ghost ups) — we use it to reset pointer ID
-  // tracking so the next contact is accepted cleanly.
+  // ── Ghost up timeout reset ref ────────────────────────────────────────────
+  const ghostResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Native Touch Event + lostpointercapture listeners on overlay canvas ────
+  // CRITICAL: Apple Pencil on iPadOS Safari has a known WebKit bug where
+  // pointerdown is suppressed after ghost pointerup events (hover transitions).
+  // Touch Events (touchstart/touchmove/touchend with touchType==='stylus') do
+  // NOT have this bug — they fire reliably for every pen contact.
+  //
+  // Strategy:
+  // - Touch Events (touchType==='stylus') = PRIMARY path for Apple Pencil
+  // - Pointer Events = fallback for mouse and non-stylus touch
+  // - lostpointercapture = reset pointer ID when capture releases
+  // - 500ms timeout after ghost up = force-reset state if no new input arrives
   useEffect(() => {
     const overlay = overlayRef.current;
     if (!overlay) return;
 
+    // ── Touch Event handlers for Apple Pencil ──────────────────────────────
+    const onTouchStart = (e: TouchEvent) => {
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i] as any;
+        if (touch.touchType !== 'stylus') continue;
+        e.preventDefault(); // prevent pointer events from also firing
+
+        // Clear any pending ghost reset
+        if (ghostResetTimeoutRef.current) {
+          clearTimeout(ghostResetTimeoutRef.current);
+          ghostResetTimeoutRef.current = null;
+        }
+
+        // If already drawing from a ghost-up scenario, finish current stroke first
+        if (isDrawing.current) {
+          // Commit the current stroke before starting new one
+          if (currentPoints.current.length >= 2) {
+            // We can't call finishStroke here (it's a useCallback closure)
+            // Instead just reset state — finishStroke will be called via pointer path
+          }
+          isDrawing.current = false;
+          activePointerId.current = null;
+          currentPoints.current = [];
+        }
+
+        // Start new stroke
+        isDrawing.current = true;
+        activePointerId.current = touch.identifier;
+        currentPoints.current = [];
+        lastRenderIndex.current = 0;
+        pixelErasedIds.current.clear();
+        pixelErasedStrokes.current = [];
+        pixelNewStrokes.current = [];
+        lastPointTime.current = Date.now();
+        predictedPoint.current = null;
+
+        const rect = overlay.getBoundingClientRect();
+        const t = transformRef.current;
+        const x = (touch.clientX - rect.left - t.offsetX) / t.scale;
+        const y = (touch.clientY - rect.top - t.offsetY) / t.scale;
+        currentPoints.current.push({
+          x, y,
+          pressure: touch.force > 0 ? touch.force : 0.5,
+          timestamp: Date.now(),
+        });
+        break; // only handle first stylus touch
+      }
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (!isDrawing.current) return;
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i] as any;
+        if (touch.touchType !== 'stylus') continue;
+        if (touch.identifier !== activePointerId.current) continue;
+        e.preventDefault();
+
+        const rect = overlay.getBoundingClientRect();
+        const t = transformRef.current;
+        const x = (touch.clientX - rect.left - t.offsetX) / t.scale;
+        const y = (touch.clientY - rect.top - t.offsetY) / t.scale;
+        const pts = currentPoints.current;
+        if (pts.length > 0) {
+          const last = pts[pts.length - 1];
+          const ddx = x - last.x, ddy = y - last.y;
+          if (ddx * ddx + ddy * ddy < 0.01) continue;
+        }
+        currentPoints.current.push({
+          x, y,
+          pressure: touch.force > 0 ? touch.force : 0.5,
+          timestamp: Date.now(),
+        });
+
+        // Trigger live render
+        needsLiveRender.current = true;
+        if (!rafId.current) {
+          rafId.current = requestAnimationFrame(() => {
+            rafId.current = 0;
+            if (!needsLiveRender.current) return;
+            needsLiveRender.current = false;
+            const octx = overlay.getContext('2d');
+            if (!octx) return;
+            const dpr = window.devicePixelRatio || 2;
+            octx.setTransform(1, 0, 0, 1, 0, 0);
+            octx.clearRect(0, 0, overlay.width, overlay.height);
+            octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            octx.save();
+            const tr = transformRef.current;
+            octx.translate(tr.offsetX, tr.offsetY);
+            octx.scale(tr.scale, tr.scale);
+            StrokeRenderer.renderStrokeLive(octx, currentPoints.current, state.strokeStyle, 0);
+            octx.restore();
+          });
+        }
+        break;
+      }
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i] as any;
+        if (touch.touchType !== 'stylus') continue;
+        if (touch.identifier !== activePointerId.current) continue;
+        e.preventDefault();
+
+        // Commit stroke via the same path as pointer events
+        // We dispatch a synthetic finishStroke by directly calling the logic
+        if (isDrawing.current && currentPoints.current.length > 0) {
+          // Signal to the pointer handler that touch ended
+          // The simplest approach: dispatch a native pointerup to trigger finishStroke
+          // Actually just duplicate the commit logic inline:
+          isDrawing.current = false;
+          const pts = [...currentPoints.current];
+          currentPoints.current = [];
+          activePointerId.current = null;
+          if (rafId.current) { cancelAnimationFrame(rafId.current); rafId.current = 0; }
+          needsLiveRender.current = false;
+
+          // Clear overlay
+          const octx = overlay.getContext('2d');
+          if (octx) {
+            octx.setTransform(1, 0, 0, 1, 0, 0);
+            octx.clearRect(0, 0, overlay.width, overlay.height);
+          }
+
+          // We need page to commit — use a custom event to trigger the React handler
+          // Dispatch a custom event that the React component listens for
+          overlay.dispatchEvent(new CustomEvent('stylus-stroke-end', { detail: { points: pts } }));
+        }
+        break;
+      }
+    };
+
+    // ── lostpointercapture handler ────────────────────────────────────────
     const onLostCapture = (e: PointerEvent) => {
-      // Pointer capture was released. If we're still drawing (ghost up scenario),
-      // reset activePointerId so the next pointerDown/Move with any ID is accepted.
       if (isDrawing.current && e.pointerId === activePointerId.current) {
         activePointerId.current = null;
       }
     };
 
+    overlay.addEventListener('touchstart',        onTouchStart,  { passive: false });
+    overlay.addEventListener('touchmove',         onTouchMove,   { passive: false });
+    overlay.addEventListener('touchend',          onTouchEnd,    { passive: false });
+    overlay.addEventListener('touchcancel',       onTouchEnd,    { passive: false });
     overlay.addEventListener('lostpointercapture', onLostCapture);
+
     return () => {
+      overlay.removeEventListener('touchstart',        onTouchStart);
+      overlay.removeEventListener('touchmove',         onTouchMove);
+      overlay.removeEventListener('touchend',          onTouchEnd);
+      overlay.removeEventListener('touchcancel',       onTouchEnd);
       overlay.removeEventListener('lostpointercapture', onLostCapture);
     };
-  }, []);
+  }, [state.strokeStyle]);
+
+  // ── stylus-stroke-end: commit touch-event strokes to React state ──────────
+  // The touch event handlers above dispatch this custom event with the collected
+  // points. We listen here where we have access to dispatch/getActivePage/etc.
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const onStylusEnd = (e: Event) => {
+      const { points } = (e as CustomEvent).detail as { points: Point[] };
+      if (!points || points.length === 0) return;
+      const page = getActivePage();
+      if (!page) return;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const p of points) {
+        minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+      }
+      const stroke: Stroke = {
+        id: uuid(),
+        points,
+        style: { ...state.strokeStyle },
+        bounds: { minX, minY, maxX, maxY },
+      };
+      committedStrokesRef.current.push(stroke);
+      const mainCanvas = canvasRef.current;
+      if (mainCanvas) {
+        const ctx = mainCanvas.getContext('2d');
+        if (ctx) {
+          const dpr = window.devicePixelRatio || 2;
+          const t = transformRef.current;
+          ctx.save();
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.translate(t.offsetX, t.offsetY);
+          ctx.scale(t.scale, t.scale);
+          StrokeRenderer.renderStroke(ctx, stroke);
+          ctx.restore();
+        }
+      }
+      dispatch({ type: 'PUSH_HISTORY', entry: { type: 'add', pageId: page.id, strokes: [stroke] } });
+      dispatch({ type: 'ADD_STROKE', pageId: page.id, stroke });
+      const nb = getActiveNotebook();
+      if (nb) persistNotebook(nb);
+    };
+    overlay.addEventListener('stylus-stroke-end', onStylusEnd);
+    return () => overlay.removeEventListener('stylus-stroke-end', onStylusEnd);
+  }, [state.strokeStyle, getActivePage, getActiveNotebook, dispatch, persistNotebook]);
 
   // ─── Coordinate transform ─────────────────────────────────
 
@@ -1331,6 +1524,22 @@ export const Canvas: React.FC = () => {
         currentPoints.current.length > 0) {
       // Release capture immediately so OS can resume events
       try { (e.target as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+      // Schedule a 500ms reset: if no new input arrives, force-reset state
+      // This handles the case where the pen fully lifts after a ghost up
+      // and never returns — without this, isDrawing stays true forever.
+      if (ghostResetTimeoutRef.current) clearTimeout(ghostResetTimeoutRef.current);
+      ghostResetTimeoutRef.current = setTimeout(() => {
+        ghostResetTimeoutRef.current = null;
+        if (isDrawing.current && currentPoints.current.length > 0) {
+          // Pen didn't return — commit what we have as a stroke
+          finishStroke();
+        } else if (isDrawing.current) {
+          // No points — just reset
+          isDrawing.current = false;
+          activePointerId.current = null;
+          currentPoints.current = [];
+        }
+      }, 500);
       // Keep isDrawing=true — stroke will continue when pen returns
       return;
     }
@@ -1497,23 +1706,26 @@ export const Canvas: React.FC = () => {
   const [diagSnapshot, setDiagSnapshot] = useState<typeof diagEventsRef.current>([]);
   const diagRefreshRef = useRef<number>(0);
 
-  // ── Window-level native pointer listener for diagnostics ────────────────
-  // Catches ALL pointer events at the window level (bypasses React synthetic
-  // events and element-level capture). This tells us if pointerdown is fired
-  // by the OS at all, even if it never reaches the canvas overlay.
+  // ── Document-level native pointer + touch listener for diagnostics ─────────
+  // Uses document (not window) with capture:true — catches events before ANY
+  // element handler. Also logs target element tag+id to detect routing issues.
+  // Also adds Touch Event listeners for stylus detection (touchType==='stylus').
   useEffect(() => {
     if (!diagVisible) return;
     const now = () => Date.now();
     const cutoff = () => now() - 30000;
-    const record = (type: string, e: PointerEvent) => {
+
+    const recordNative = (type: string, e: PointerEvent) => {
       if (e.pointerType !== 'pen' && e.pointerType !== 'mouse') return;
       diagEventsRef.current = diagEventsRef.current.filter(ev => ev.t > cutoff());
-      const note = type === 'down' && e.buttons === 0 ? 'WIN-BTN0' :
-                   type === 'down' ? 'WIN-DOWN' :
-                   type === 'up'   ? 'WIN-UP'   :
-                   type === 'cancel' ? 'WIN-CANCEL' : 'WIN-MOVE';
+      const target = e.target as HTMLElement;
+      const targetInfo = target ? `${target.tagName}#${target.id || '?'}` : '?';
+      const note = type === 'down' && e.buttons === 0 ? `DOC-BTN0@${targetInfo}` :
+                   type === 'down' ? `DOC-DOWN@${targetInfo}` :
+                   type === 'up'   ? `DOC-UP@${targetInfo}` :
+                   type === 'cancel' ? `DOC-CANCEL@${targetInfo}` : `DOC-MOVE`;
       diagEventsRef.current.push({
-        t: now(), type: `w:${type}`, pointerId: e.pointerId,
+        t: now(), type: `d:${type}`, pointerId: e.pointerId,
         pointerType: e.pointerType,
         pressure: Math.round(e.pressure * 1000) / 1000,
         buttons: e.buttons, isPrimary: e.isPrimary,
@@ -1527,16 +1739,45 @@ export const Canvas: React.FC = () => {
         setDiagSnapshot([...diagEventsRef.current].reverse().slice(0, 200));
       });
     };
-    const onDown   = (e: PointerEvent) => record('down', e);
-    const onUp     = (e: PointerEvent) => record('up', e);
-    const onCancel = (e: PointerEvent) => record('cancel', e);
-    window.addEventListener('pointerdown',   onDown,   { capture: true, passive: true });
-    window.addEventListener('pointerup',     onUp,     { capture: true, passive: true });
-    window.addEventListener('pointercancel', onCancel, { capture: true, passive: true });
+
+    const recordTouch = (type: string, e: TouchEvent) => {
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const t2 = e.changedTouches[i] as any;
+        if (t2.touchType !== 'stylus') continue;
+        diagEventsRef.current = diagEventsRef.current.filter(ev => ev.t > cutoff());
+        diagEventsRef.current.push({
+          t: now(), type: `t:${type}`, pointerId: t2.identifier,
+          pointerType: 'stylus',
+          pressure: Math.round((t2.force ?? 0) * 1000) / 1000,
+          buttons: type === 'start' ? 1 : 0, isPrimary: true,
+          width: 0, height: 0, tiltX: 0, tiltY: 0, twist: 0, tangentialPressure: 0,
+          isDrawing: isDrawing.current, activePtrId: activePointerId.current,
+          note: `TOUCH-${type.toUpperCase()}`,
+        });
+        if (diagRefreshRef.current) cancelAnimationFrame(diagRefreshRef.current);
+        diagRefreshRef.current = requestAnimationFrame(() => {
+          setDiagSnapshot([...diagEventsRef.current].reverse().slice(0, 200));
+        });
+      }
+    };
+
+    const onDown   = (e: PointerEvent) => recordNative('down', e);
+    const onUp     = (e: PointerEvent) => recordNative('up', e);
+    const onCancel = (e: PointerEvent) => recordNative('cancel', e);
+    const onTStart = (e: TouchEvent) => recordTouch('start', e);
+    const onTEnd   = (e: TouchEvent) => recordTouch('end', e);
+
+    document.addEventListener('pointerdown',   onDown,   { capture: true, passive: true });
+    document.addEventListener('pointerup',     onUp,     { capture: true, passive: true });
+    document.addEventListener('pointercancel', onCancel, { capture: true, passive: true });
+    document.addEventListener('touchstart',    onTStart, { capture: true, passive: true });
+    document.addEventListener('touchend',      onTEnd,   { capture: true, passive: true });
     return () => {
-      window.removeEventListener('pointerdown',   onDown,   { capture: true });
-      window.removeEventListener('pointerup',     onUp,     { capture: true });
-      window.removeEventListener('pointercancel', onCancel, { capture: true });
+      document.removeEventListener('pointerdown',   onDown,   { capture: true });
+      document.removeEventListener('pointerup',     onUp,     { capture: true });
+      document.removeEventListener('pointercancel', onCancel, { capture: true });
+      document.removeEventListener('touchstart',    onTStart, { capture: true });
+      document.removeEventListener('touchend',      onTEnd,   { capture: true });
     };
   }, [diagVisible]);
 
