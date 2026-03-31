@@ -1280,6 +1280,13 @@ export const Canvas: React.FC = () => {
     if (!isDrawing.current) return;
     if (e.pointerId === activePointerId.current) {
       finishStroke();
+      // Explicitly release pointer capture after finishing.
+      // The browser auto-releases on pointerup, but doing it explicitly ensures
+      // the next pointerDown is not swallowed when the pen returns quickly.
+      // This is critical for fast writing: ghost pointerUp (buttons=0) fires,
+      // we finish the stroke, then the real next stroke's pointerDown must be
+      // received cleanly without capture interference.
+      try { (e.target as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* ignore */ }
     }
     // If e.pointerId !== activePointerId, this is a stale UP from the previous
     // stroke — the new stroke is already running, so we correctly ignore it.
@@ -1461,7 +1468,9 @@ export const Canvas: React.FC = () => {
   }, []);
 
   const diagWrapDown = useCallback((e: React.PointerEvent) => {
-    recordDiagEvent(e, 'down', '');
+    // Record BEFORE handlePointerDown so we see it even if handlePointerDown returns early
+    const note = e.buttons === 0 ? 'BTN0' : '';
+    recordDiagEvent(e, 'down', note);
     handlePointerDown(e);
   }, [handlePointerDown, recordDiagEvent]);
 
