@@ -1274,18 +1274,37 @@ export const Canvas: React.FC = () => {
       return;
     }
 
+    // Ghost pointerUp detection:
+    // iPadOS fires pointerUp with buttons=0 AND pressure=0 when the pen
+    // transitions to hover state (not actually lifted). This is NOT a real
+    // pen lift — it's the OS signaling hover mode. If we commit the stroke
+    // here, no further pointerDown will fire (the OS considers the pen still
+    // "connected") and the next segment is lost.
+    //
+    // Detection: pen pointerUp during active drawing with buttons=0 AND pressure=0
+    // Real lifts have pressure>0 on the last move before up, and buttons may vary.
+    // Ghost ups always have both buttons=0 AND pressure=0 simultaneously.
+    //
+    // Fix: ignore ghost ups — keep isDrawing=true so the stroke continues
+    // when the pen touches down again. The stroke will be committed on the
+    // next real pointerUp (pressure>0 or buttons>0) or pointerCancel.
+    if (isDrawing.current &&
+        e.pointerType === 'pen' &&
+        e.buttons === 0 &&
+        e.pressure === 0 &&
+        currentPoints.current.length > 0) {
+      // This is a ghost up — pen is hovering, not lifted.
+      // Log it in diagnostics but do NOT commit the stroke.
+      // The stroke remains active and will continue on next pointerDown/Move.
+      return;
+    }
+
     // Finish if this is our active pointer OR if it's a stale up from the
     // previous stroke (fast writing: old UP arrives after new DOWN already started).
     // In the stale case, isDrawing is true but for the NEW pointer — don't finish.
     if (!isDrawing.current) return;
     if (e.pointerId === activePointerId.current) {
       finishStroke();
-      // Explicitly release pointer capture after finishing.
-      // The browser auto-releases on pointerup, but doing it explicitly ensures
-      // the next pointerDown is not swallowed when the pen returns quickly.
-      // This is critical for fast writing: ghost pointerUp (buttons=0) fires,
-      // we finish the stroke, then the real next stroke's pointerDown must be
-      // received cleanly without capture interference.
       try { (e.target as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* ignore */ }
     }
     // If e.pointerId !== activePointerId, this is a stale UP from the previous
@@ -1528,7 +1547,9 @@ export const Canvas: React.FC = () => {
   }, [handlePointerMove, recordDiagEvent]);
 
   const diagWrapUp = useCallback((e: React.PointerEvent) => {
-    recordDiagEvent(e, 'up', '');
+    const note = (e.pointerType === 'pen' && e.buttons === 0 && e.pressure === 0 && isDrawing.current)
+      ? 'GHOST-UP' : '';
+    recordDiagEvent(e, 'up', note);
     handlePointerUp(e);
   }, [handlePointerUp, recordDiagEvent]);
 
