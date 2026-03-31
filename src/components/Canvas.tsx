@@ -644,6 +644,33 @@ export const Canvas: React.FC = () => {
       shapeData,
     };
 
+    // ── IMMEDIATE PAINT ──────────────────────────────────────────────────────
+    // Draw the stroke directly onto the main canvas RIGHT NOW, before dispatching
+    // to React. This decouples visibility from React's async render cycle.
+    //
+    // Problem this solves: React 18 automatic batching means dispatch(ADD_STROKE)
+    // does not synchronously update state. The re-render + redrawAll() that reads
+    // page.strokes may fire 4-16ms later, or may batch with other updates and
+    // miss strokes entirely (the 'x' / two-part letter miss).
+    //
+    // Solution: The canvas IS the truth for what's visible. React state is only
+    // for persistence and undo. Never wait for React to make a stroke appear.
+    const mainCanvas = canvasRef.current;
+    if (mainCanvas) {
+      const ctx = mainCanvas.getContext('2d');
+      if (ctx) {
+        const dpr = window.devicePixelRatio || 2;
+        const t = transformRef.current;
+        ctx.save();
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.translate(t.offsetX, t.offsetY);
+        ctx.scale(t.scale, t.scale);
+        StrokeRenderer.renderStroke(ctx, stroke);
+        ctx.restore();
+      }
+    }
+
+    // Dispatch to React for persistence/undo — canvas doesn't wait for this
     dispatch({ type: 'PUSH_HISTORY', entry: { type: 'add', pageId: page.id, strokes: [stroke] } });
     dispatch({ type: 'ADD_STROKE', pageId: page.id, stroke });
 
