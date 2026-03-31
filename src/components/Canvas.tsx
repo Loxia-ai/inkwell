@@ -1442,6 +1442,49 @@ export const Canvas: React.FC = () => {
   const [diagSnapshot, setDiagSnapshot] = useState<typeof diagEventsRef.current>([]);
   const diagRefreshRef = useRef<number>(0);
 
+  // ── Window-level native pointer listener for diagnostics ────────────────
+  // Catches ALL pointer events at the window level (bypasses React synthetic
+  // events and element-level capture). This tells us if pointerdown is fired
+  // by the OS at all, even if it never reaches the canvas overlay.
+  useEffect(() => {
+    if (!diagVisible) return;
+    const now = () => Date.now();
+    const cutoff = () => now() - 30000;
+    const record = (type: string, e: PointerEvent) => {
+      if (e.pointerType !== 'pen' && e.pointerType !== 'mouse') return;
+      diagEventsRef.current = diagEventsRef.current.filter(ev => ev.t > cutoff());
+      const note = type === 'down' && e.buttons === 0 ? 'WIN-BTN0' :
+                   type === 'down' ? 'WIN-DOWN' :
+                   type === 'up'   ? 'WIN-UP'   :
+                   type === 'cancel' ? 'WIN-CANCEL' : 'WIN-MOVE';
+      diagEventsRef.current.push({
+        t: now(), type: `w:${type}`, pointerId: e.pointerId,
+        pointerType: e.pointerType,
+        pressure: Math.round(e.pressure * 1000) / 1000,
+        buttons: e.buttons, isPrimary: e.isPrimary,
+        width: 0, height: 0, tiltX: Math.round(e.tiltX), tiltY: Math.round(e.tiltY),
+        twist: 0, tangentialPressure: 0,
+        isDrawing: isDrawing.current, activePtrId: activePointerId.current,
+        note,
+      });
+      if (diagRefreshRef.current) cancelAnimationFrame(diagRefreshRef.current);
+      diagRefreshRef.current = requestAnimationFrame(() => {
+        setDiagSnapshot([...diagEventsRef.current].reverse().slice(0, 200));
+      });
+    };
+    const onDown   = (e: PointerEvent) => record('down', e);
+    const onUp     = (e: PointerEvent) => record('up', e);
+    const onCancel = (e: PointerEvent) => record('cancel', e);
+    window.addEventListener('pointerdown',   onDown,   { capture: true, passive: true });
+    window.addEventListener('pointerup',     onUp,     { capture: true, passive: true });
+    window.addEventListener('pointercancel', onCancel, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener('pointerdown',   onDown,   { capture: true });
+      window.removeEventListener('pointerup',     onUp,     { capture: true });
+      window.removeEventListener('pointercancel', onCancel, { capture: true });
+    };
+  }, [diagVisible]);
+
   const recordDiagEvent = useCallback((e: React.PointerEvent, type: string, note = '') => {
     const now = Date.now();
     // Prune events older than 30s
