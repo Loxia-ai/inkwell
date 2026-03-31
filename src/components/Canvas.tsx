@@ -407,10 +407,28 @@ export const Canvas: React.FC = () => {
 
     const dpr = window.devicePixelRatio || 2;
     const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
 
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
+    const targetW = Math.round(rect.width * dpr);
+    const targetH = Math.round(rect.height * dpr);
+
+    // Only resize when dimensions actually changed.
+    // Setting canvas.width/height unconditionally on every redraw:
+    //   1. Resets the 2D context transform and state
+    //   2. Forces GPU texture reallocation
+    //   3. Creates a blank-canvas window during the reset — causing the
+    //      second stroke of two-part letters (i, j, !, :) to disappear
+    //      because redrawAll runs between stroke 2's commit and its
+    //      appearance in page.strokes.
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+    }
+
+    // Always reset transform and clear before redrawing
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     drawBackground(ctx, rect.width, rect.height, page.background);
 

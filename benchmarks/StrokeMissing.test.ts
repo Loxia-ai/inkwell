@@ -180,3 +180,65 @@ console.log('\n=== 8. Touch pan → immediate pen stroke (most common miss scena
 console.log(`\n${'='.repeat(60)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);
 console.log('='.repeat(60));
+
+console.log('\n=== 9. Two-part letter (dot + body) — both strokes committed ===');
+{
+  // Simulates writing "i" or "j": body stroke, brief lift, dot stroke
+  // The dot arrives 50-150ms after the body pointerUp
+  const sm = new PointerStateMachine();
+
+  // Body of "i"
+  sm.pointerDown(pen(1, 100, 50));
+  sm.pointerMove(pen(1, 100, 60)); sm.pointerMove(pen(1, 100, 70));
+  sm.pointerMove(pen(1, 100, 80)); sm.pointerMove(pen(1, 100, 90));
+  sm.pointerUp(pen(1, 100, 90));
+
+  // Dot of "i" — arrives quickly after (same pointer ID, different position)
+  sm.pointerDown(pen(1, 100, 40));
+  sm.pointerMove(pen(1, 101, 40)); sm.pointerMove(pen(1, 102, 40));
+  sm.pointerUp(pen(1, 102, 40));
+
+  assert(sm.committedStrokes.length === 2,
+    `Two-part letter: both strokes committed (got ${sm.committedStrokes.length})`);
+  assert(sm.committedStrokes[0].points.length >= 5,
+    `Body stroke has all points (${sm.committedStrokes[0]?.points.length})`);
+  assert(sm.committedStrokes[1].points.length >= 3,
+    `Dot stroke has all points (${sm.committedStrokes[1]?.points.length})`);
+}
+
+console.log('\n=== 10. Two-part letter with different pointer IDs (OS reassignment) ===');
+{
+  // Same scenario but OS assigns new pointer ID for the dot stroke
+  const sm = new PointerStateMachine();
+
+  sm.pointerDown(pen(1, 100, 50));
+  sm.pointerMove(pen(1, 100, 60)); sm.pointerMove(pen(1, 100, 70));
+  sm.pointerUp(pen(1, 100, 70));
+
+  // Dot with NEW pointer ID (OS reassignment on fast re-touch)
+  sm.pointerDown(pen(2, 100, 40));  // ID=2 instead of 1
+  sm.pointerMove(pen(2, 101, 40)); sm.pointerMove(pen(2, 102, 40));
+  sm.pointerUp(pen(2, 102, 40));
+
+  assert(sm.committedStrokes.length === 2,
+    `Two-part letter (different IDs): both strokes committed (got ${sm.committedStrokes.length})`);
+}
+
+console.log('\n=== 11. Three-part letter (colon, equals, Chinese char) ===');
+{
+  const sm = new PointerStateMachine();
+
+  for (let stroke = 0; stroke < 3; stroke++) {
+    sm.pointerDown(pen(1, 50 + stroke * 30, 100));
+    sm.pointerMove(pen(1, 55 + stroke * 30, 110));
+    sm.pointerMove(pen(1, 60 + stroke * 30, 120));
+    sm.pointerUp(pen(1, 60 + stroke * 30, 120));
+  }
+
+  assert(sm.committedStrokes.length === 3,
+    `Three-part letter: all 3 strokes committed (got ${sm.committedStrokes.length})`);
+}
+
+console.log(`\n${'='.repeat(60)}`);
+console.log(`Results: ${passed} passed, ${failed} failed`);
+console.log('='.repeat(60));
