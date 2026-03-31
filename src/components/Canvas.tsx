@@ -1421,6 +1421,74 @@ export const Canvas: React.FC = () => {
     );
   }, [state.ruler, dispatch]);
 
+  // ─── Pen Diagnostics ──────────────────────────────────────
+
+  const [diagVisible, setDiagVisible] = useState(false);
+  const diagEventsRef = useRef<Array<{
+    t: number; type: string; pointerId: number; pointerType: string;
+    pressure: number; buttons: number; isPrimary: boolean;
+    width: number; height: number; tiltX: number; tiltY: number;
+    twist: number; tangentialPressure: number;
+    isDrawing: boolean; activePtrId: number | null;
+    note: string;
+  }>>([]);
+  const [diagSnapshot, setDiagSnapshot] = useState<typeof diagEventsRef.current>([]);
+  const diagRefreshRef = useRef<number>(0);
+
+  const recordDiagEvent = useCallback((e: React.PointerEvent, type: string, note = '') => {
+    const now = Date.now();
+    // Prune events older than 30s
+    const cutoff = now - 30000;
+    diagEventsRef.current = diagEventsRef.current.filter(ev => ev.t > cutoff);
+    diagEventsRef.current.push({
+      t: now, type, pointerId: e.pointerId, pointerType: e.pointerType,
+      pressure: Math.round(e.pressure * 1000) / 1000,
+      buttons: e.buttons, isPrimary: e.isPrimary,
+      width: Math.round(e.width * 10) / 10,
+      height: Math.round(e.height * 10) / 10,
+      tiltX: Math.round(e.tiltX), tiltY: Math.round(e.tiltY),
+      twist: Math.round(e.twist),
+      tangentialPressure: Math.round(e.tangentialPressure * 1000) / 1000,
+      isDrawing: isDrawing.current,
+      activePtrId: activePointerId.current,
+      note,
+    });
+    // Debounce React state update to avoid re-render on every move
+    if (diagRefreshRef.current) cancelAnimationFrame(diagRefreshRef.current);
+    diagRefreshRef.current = requestAnimationFrame(() => {
+      setDiagSnapshot([...diagEventsRef.current].reverse().slice(0, 200));
+    });
+  }, []);
+
+  const diagWrapDown = useCallback((e: React.PointerEvent) => {
+    recordDiagEvent(e, 'down', '');
+    handlePointerDown(e);
+  }, [handlePointerDown, recordDiagEvent]);
+
+  const diagWrapMove = useCallback((e: React.PointerEvent) => {
+    // Only record move events for pen/stylus to avoid noise
+    if (e.pointerType === 'pen' || e.pointerType === 'mouse') {
+      const note = e.buttons === 0 ? 'HOVER' :
+        e.pointerId !== (activePointerId.current ?? e.pointerId) ? 'ID_MISMATCH' : '';
+      recordDiagEvent(e, 'move', note);
+    }
+    handlePointerMove(e);
+  }, [handlePointerMove, recordDiagEvent]);
+
+  const diagWrapUp = useCallback((e: React.PointerEvent) => {
+    recordDiagEvent(e, 'up', '');
+    handlePointerUp(e);
+  }, [handlePointerUp, recordDiagEvent]);
+
+  const diagWrapCancel = useCallback((e: React.PointerEvent) => {
+    recordDiagEvent(e, 'cancel', 'CANCELLED');
+    handlePointerCancel(e);
+  }, [handlePointerCancel, recordDiagEvent]);
+
+  const typeColor: Record<string, string> = {
+    down: '#4ade80', up: '#60a5fa', cancel: '#f87171', move: '#d1d5db',
+  };
+
   const page = getActivePage();
 
   if (!page) {
@@ -1445,12 +1513,85 @@ export const Canvas: React.FC = () => {
       <canvas
         ref={overlayRef}
         style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', touchAction: 'none', cursor: state.activeTool === 'eraser' ? 'none' : 'crosshair' }}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerCancel}
+        onPointerDown={diagWrapDown}
+        onPointerMove={diagWrapMove}
+        onPointerUp={diagWrapUp}
+        onPointerCancel={diagWrapCancel}
       />
       {renderRuler()}
+
+      {/* Pen Diagnostics Toggle Button */}
+      <button
+        onPointerDown={e => e.stopPropagation()}
+        onClick={() => setDiagVisible(v => !v)}
+        style={{
+          position: 'absolute', bottom: 12, right: 12, zIndex: 100,
+          background: diagVisible ? '#1d4ed8' : 'rgba(0,0,0,0.6)',
+          color: '#fff', border: '1px solid rgba(255,255,255,0.2)',
+          borderRadius: 8, padding: '6px 12px', fontSize: 12,
+          cursor: 'pointer', fontFamily: 'monospace',
+        }}
+      >
+        🖊 Diag {diagVisible ? '▲' : '▼'}
+      </button>
+
+      {/* Pen Diagnostics Panel */}
+      {diagVisible && (
+        <div
+          onPointerDown={e => e.stopPropagation()}
+          style={{
+            position: 'absolute', bottom: 48, right: 8, zIndex: 100,
+            width: 420, maxHeight: '65vh',
+            background: 'rgba(10,10,15,0.95)', color: '#e5e7eb',
+            border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10,
+            fontFamily: 'monospace', fontSize: 10.5,
+            display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+          }}
+        >
+          {/* Header */}
+          <div style={{ padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontWeight: 'bold', fontSize: 12 }}>🖊 Pen Diagnostics — last 30s ({diagSnapshot.length} events)</span>
+            <button
+              onClick={() => { diagEventsRef.current = []; setDiagSnapshot([]); }}
+              style={{ background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 11 }}
+            >Clear</button>
+          </div>
+          {/* Column headers */}
+          <div style={{ padding: '4px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', color: '#9ca3af', display: 'grid', gridTemplateColumns: '45px 50px 30px 28px 55px 52px 40px 1fr', gap: 2 }}>
+            <span>type</span><span>ptrId</span><span>typ</span><span>btn</span><span>pressure</span><span>tilt x/y</span><span>draw</span><span>note</span>
+          </div>
+          {/* Event rows */}
+          <div style={{ overflowY: 'auto', flex: 1 }}>
+            {diagSnapshot.length === 0 && (
+              <div style={{ padding: 16, color: '#6b7280', textAlign: 'center' }}>Draw something to see events...</div>
+            )}
+            {diagSnapshot.map((ev, i) => (
+              <div key={i} style={{
+                padding: '2px 12px',
+                background: ev.note ? 'rgba(251,191,36,0.12)' : ev.type === 'cancel' ? 'rgba(248,113,113,0.08)' : 'transparent',
+                display: 'grid', gridTemplateColumns: '45px 50px 30px 28px 55px 52px 40px 1fr', gap: 2,
+                borderBottom: '1px solid rgba(255,255,255,0.03)',
+              }}>
+                <span style={{ color: typeColor[ev.type] ?? '#fff', fontWeight: ev.type !== 'move' ? 'bold' : 'normal' }}>{ev.type}</span>
+                <span style={{ color: '#a78bfa' }}>#{ev.pointerId}</span>
+                <span style={{ color: '#67e8f9' }}>{ev.pointerType.slice(0,3)}</span>
+                <span style={{ color: ev.buttons === 0 ? '#f87171' : '#4ade80' }}>{ev.buttons}</span>
+                <span style={{ color: ev.pressure === 0 ? '#6b7280' : '#fbbf24' }}>{ev.pressure.toFixed(3)}</span>
+                <span style={{ color: '#94a3b8' }}>{ev.tiltX}/{ev.tiltY}</span>
+                <span style={{ color: ev.isDrawing ? '#4ade80' : '#6b7280' }}>{ev.isDrawing ? 'Y' : 'N'}</span>
+                <span style={{ color: '#fbbf24', fontWeight: 'bold' }}>{ev.note}</span>
+              </div>
+            ))}
+          </div>
+          {/* Live stats */}
+          <div style={{ padding: '6px 12px', borderTop: '1px solid rgba(255,255,255,0.08)', color: '#9ca3af', fontSize: 10 }}>
+            activePtr: <span style={{ color: '#a78bfa' }}>{activePointerId.current ?? 'null'}</span>
+            {' · '} isDrawing: <span style={{ color: isDrawing.current ? '#4ade80' : '#f87171' }}>{String(isDrawing.current)}</span>
+            {' · '} pts: <span style={{ color: '#60a5fa' }}>{currentPoints.current.length}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
