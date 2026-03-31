@@ -1081,7 +1081,20 @@ export const Canvas: React.FC = () => {
       return;
     }
 
-    if (!isDrawing.current || e.pointerId !== activePointerId.current) return;
+    // If we're drawing but the pointer ID changed mid-stroke (iPad OS can reassign
+    // pointer IDs between pointerDown and pointerMove for the Apple Pencil),
+    // adopt the new pointer ID instead of silently dropping all subsequent events.
+    // This is the 'entire long stroke missing' bug — pen IS on surface, events fire,
+    // but all are dropped because the ID check fails.
+    if (!isDrawing.current) return;
+    if (e.pointerId !== activePointerId.current) {
+      // Only adopt if this is a pen/mouse event (not touch — touch is handled above)
+      if (e.pointerType !== 'touch') {
+        activePointerId.current = e.pointerId;
+      } else {
+        return;
+      }
+    }
 
     const coalesced = (e.nativeEvent as any).getCoalescedEvents?.() || [];
     const predicted = (e.nativeEvent as any).getPredictedEvents?.() || [];
