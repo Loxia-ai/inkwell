@@ -1081,24 +1081,17 @@ export const Canvas: React.FC = () => {
       return;
     }
 
-    // ── Pressure-based stroke detection (consultant-recommended pattern) ────
-    // iPadOS WebKit has a known quirk: after a hover transition, it fires a
-    // spurious pointerUp (buttons=0, pressure=0) and then suppresses the next
-    // pointerDown. GoodNotes/Procreate solve this by NOT relying on pointerDown
-    // to start strokes — instead they watch for pressure >= threshold on
-    // pointerMove with buttons=1 (pen tip touching screen).
+    // ── Touch detection: buttons===1 means pen tip touching screen ──────────
+    // On iPadOS WebKit, e.pressure is often 0 even when touching (unreliable).
+    // e.buttons is the ONLY reliable signal: 1=touching, 0=hovering/lifted.
     //
-    // Rule: pen is touching the screen ↔ (buttons === 1 AND pressure >= 0.05)
-    // Rule: pen is hovering           ↔ (buttons === 0 OR pressure < 0.05)
-    //
-    // Filter hover moves — never draw ink when pen is not touching
-    if (e.pointerType === 'pen' && (e.buttons === 0 || e.pressure < 0.02)) return;
+    // Filter: ignore all pen moves where buttons===0 (hover or lifted)
+    if (e.pointerType === 'pen' && e.buttons === 0) return;
 
-    // Auto-start stroke from pointermove if pen is touching but isDrawing=false.
-    // This is the fallback for when pointerDown was suppressed by iPadOS after
-    // a hover transition. The stroke starts the moment pressure is detected.
-    if (!isDrawing.current && e.pointerType === 'pen' && e.buttons === 1 && e.pressure >= 0.05) {
-      // Start a new stroke here — same logic as handlePointerDown
+    // Auto-start stroke from pointermove when buttons===1 but isDrawing=false.
+    // This handles the iPadOS quirk where pointerDown is suppressed after a
+    // hover transition. The stroke starts on the first move with buttons===1.
+    if (!isDrawing.current && e.pointerType === 'pen' && e.buttons === 1) {
       isDrawing.current = true;
       activePointerId.current = e.pointerId;
       currentPoints.current = [];
@@ -1108,11 +1101,10 @@ export const Canvas: React.FC = () => {
       pixelNewStrokes.current = [];
       lastPointTime.current = Date.now();
       predictedPoint.current = null;
-      // Capture the pointer so subsequent events route here
       try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch { /* ignore */ }
     }
 
-    // If still not drawing after auto-start attempt, bail
+    // If still not drawing, bail
     if (!isDrawing.current) return;
 
     // Adopt new pointer ID if it changed mid-stroke (iPadOS reassignment)
