@@ -104,6 +104,13 @@ export const Canvas: React.FC = () => {
   const pixelErasedStrokes = useRef<Stroke[]>([]);
   const pixelNewStrokes = useRef<Stroke[]>([]);
 
+  // ── Committed strokes buffer ──────────────────────────────────────────
+  // Strokes that have been immediately painted to the main canvas but may
+  // not yet appear in page.strokes (React state is async). redrawAll()
+  // renders these ON TOP of page.strokes so they survive full-canvas clears.
+  // Once a stroke ID appears in page.strokes, it's pruned from this buffer.
+  const committedStrokesRef = useRef<Stroke[]>([]);
+
   // Pinch/pan state
   const touchCache = useRef<Map<number, PointerEvent>>(new Map());
   const lastPinchDist = useRef<number | null>(null);
@@ -439,9 +446,26 @@ export const Canvas: React.FC = () => {
 
     drawImages(ctx, page.images, selectedImageId);
 
+    // Build a set of stroke IDs already in React state for fast lookup
+    const stateStrokeIds = new Set<string>();
     for (const stroke of page.strokes) {
+      stateStrokeIds.add(stroke.id);
       StrokeRenderer.renderStroke(ctx, stroke);
     }
+
+    // ── Render committed buffer strokes ──────────────────────────────────
+    // These are strokes that were immediately painted but may not yet be in
+    // page.strokes due to React's async batching. We render them here so
+    // they survive the full-canvas clear that redrawAll() just did.
+    // Prune any that have already appeared in page.strokes.
+    const pending: Stroke[] = [];
+    for (const stroke of committedStrokesRef.current) {
+      if (!stateStrokeIds.has(stroke.id)) {
+        StrokeRenderer.renderStroke(ctx, stroke);
+        pending.push(stroke);
+      }
+    }
+    committedStrokesRef.current = pending;
 
     ctx.restore();
   }, [getActivePage, drawBackground, drawImages, selectedImageId]);
@@ -644,17 +668,15 @@ export const Canvas: React.FC = () => {
       shapeData,
     };
 
-    // ── IMMEDIATE PAINT ──────────────────────────────────────────────────────
-    // Draw the stroke directly onto the main canvas RIGHT NOW, before dispatching
-    // to React. This decouples visibility from React's async render cycle.
-    //
-    // Problem this solves: React 18 automatic batching means dispatch(ADD_STROKE)
-    // does not synchronously update state. The re-render + redrawAll() that reads
-    // page.strokes may fire 4-16ms later, or may batch with other updates and
-    // miss strokes entirely (the 'x' / two-part letter miss).
-    //
-    // Solution: The canvas IS the truth for what's visible. React state is only
-    // for persistence and undo. Never wait for React to make a stroke appear.
+    // ── COMMITTED STROKES BUFFER ─────────────────────────────────────────────
+    // Push the stroke into the committed buffer BEFORE dispatching to React.
+    // redrawAll() renders these on top of page.strokes so they survive the
+    // full-canvas clear that React's re-render triggers. Without this, fast
+    // strokes (second line of 'x', dots of 'i') get wiped when redrawAll()
+    // fires for a PREVIOUS stroke's state update and clears the canvas.
+    committedStrokesRef.current.push(stroke);
+
+    // Also paint immediately so the stroke is visible without waiting for rAF
     const mainCanvas = canvasRef.current;
     if (mainCanvas) {
       const ctx = mainCanvas.getContext('2d');
