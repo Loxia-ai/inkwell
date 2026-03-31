@@ -56,9 +56,9 @@ const AppContent: React.FC = () => {
         ) : (
           <div className="welcome">
             <img
-              src="/illustrations/empty-state.png"
-              alt="Open notebook"
-              className="welcome-illustration"
+              src="/inkwell-logo.png"
+              alt="Inkwell"
+              className="welcome-logo"
             />
             <h1>Inkwell</h1>
             <p>A beautiful notebook for your iPad. Write, sketch, and create with precision.</p>

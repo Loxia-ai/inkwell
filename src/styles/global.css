@@ -104,6 +104,14 @@ canvas {
   opacity: 0.6;
 }
 
+.canvas-empty-logo {
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  opacity: 0.85;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.12));
+}
+
 .canvas-empty p {
   font-size: 17px;
   font-weight: 500;
@@ -134,6 +142,15 @@ canvas {
   margin-bottom: 16px;
   opacity: 0.92;
   filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.08));
+  animation: floatIn 0.6s ease-out;
+}
+
+.welcome-logo {
+  width: 180px;
+  height: 180px;
+  object-fit: contain;
+  margin-bottom: 8px;
+  filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.12));
   animation: floatIn 0.6s ease-out;
 }
 

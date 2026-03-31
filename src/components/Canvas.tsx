@@ -1844,7 +1844,7 @@ export const Canvas: React.FC = () => {
   if (!page) {
     return (
       <div className="canvas-empty">
-        <div className="canvas-empty-icon">📒</div>
+        <img src="/inkwell-logo.png" alt="Inkwell" className="canvas-empty-logo" />
         <p>Select or create a notebook to start drawing</p>
       </div>
     );
