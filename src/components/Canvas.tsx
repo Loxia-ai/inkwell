@@ -1081,21 +1081,42 @@ export const Canvas: React.FC = () => {
       return;
     }
 
-    // Filter hover events: Apple Pencil fires pointerMove with buttons=0 when
-    // hovering above the screen (not touching). These must never add points or
-    // adopt a new pointer ID — they are NOT drawing events.
-    // e.buttons === 0 means no button/stylus contact. e.buttons === 1 means
-    // the primary button (stylus tip touching screen) is active.
-    if (e.pointerType === 'pen' && e.buttons === 0) return;
+    // ── Pressure-based stroke detection (consultant-recommended pattern) ────
+    // iPadOS WebKit has a known quirk: after a hover transition, it fires a
+    // spurious pointerUp (buttons=0, pressure=0) and then suppresses the next
+    // pointerDown. GoodNotes/Procreate solve this by NOT relying on pointerDown
+    // to start strokes — instead they watch for pressure >= threshold on
+    // pointerMove with buttons=1 (pen tip touching screen).
+    //
+    // Rule: pen is touching the screen ↔ (buttons === 1 AND pressure >= 0.05)
+    // Rule: pen is hovering           ↔ (buttons === 0 OR pressure < 0.05)
+    //
+    // Filter hover moves — never draw ink when pen is not touching
+    if (e.pointerType === 'pen' && (e.buttons === 0 || e.pressure < 0.02)) return;
 
-    // If we're drawing but the pointer ID changed mid-stroke (iPad OS can reassign
-    // pointer IDs between pointerDown and pointerMove for the Apple Pencil),
-    // adopt the new pointer ID instead of silently dropping all subsequent events.
-    // This is the 'entire long stroke missing' bug — pen IS on surface, events fire,
-    // but all are dropped because the ID check fails.
+    // Auto-start stroke from pointermove if pen is touching but isDrawing=false.
+    // This is the fallback for when pointerDown was suppressed by iPadOS after
+    // a hover transition. The stroke starts the moment pressure is detected.
+    if (!isDrawing.current && e.pointerType === 'pen' && e.buttons === 1 && e.pressure >= 0.05) {
+      // Start a new stroke here — same logic as handlePointerDown
+      isDrawing.current = true;
+      activePointerId.current = e.pointerId;
+      currentPoints.current = [];
+      lastRenderIndex.current = 0;
+      pixelErasedIds.current.clear();
+      pixelErasedStrokes.current = [];
+      pixelNewStrokes.current = [];
+      lastPointTime.current = Date.now();
+      predictedPoint.current = null;
+      // Capture the pointer so subsequent events route here
+      try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    }
+
+    // If still not drawing after auto-start attempt, bail
     if (!isDrawing.current) return;
+
+    // Adopt new pointer ID if it changed mid-stroke (iPadOS reassignment)
     if (e.pointerId !== activePointerId.current) {
-      // Only adopt if this is a pen/mouse event (not touch — touch is handled above)
       if (e.pointerType !== 'touch') {
         activePointerId.current = e.pointerId;
       } else {
