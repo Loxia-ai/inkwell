@@ -834,9 +834,12 @@ export const Canvas: React.FC = () => {
         }
       }
 
-      // Clicked empty area — deselect image
+      // Clicked empty area — deselect image.
+      // Use a ref-based flag instead of setState to avoid triggering a React
+      // re-render mid-pointerDown which can cause stale closure issues.
       if (selectedImageId) {
-        setSelectedImageId(null);
+        // Defer deselection to after drawing starts to avoid re-render race
+        setTimeout(() => setSelectedImageId(null), 0);
       }
     }
 
@@ -1032,7 +1035,9 @@ export const Canvas: React.FC = () => {
           const last = pts[pts.length - 1];
           const ddx = newPt.x - last.x;
           const ddy = newPt.y - last.y;
-          if (ddx * ddx + ddy * ddy < 0.25) continue;
+          // Only skip truly identical points (< 0.1px) — not 0.5px.
+          // The 0.5px threshold was dropping valid points from slow/precise drawing.
+          if (ddx * ddx + ddy * ddy < 0.01) continue;
         }
         currentPoints.current.push(newPt);
       }
@@ -1050,7 +1055,8 @@ export const Canvas: React.FC = () => {
         const last = pts[pts.length - 1];
         const ddx = newPt.x - last.x;
         const ddy = newPt.y - last.y;
-        if (ddx * ddx + ddy * ddy >= 0.25) {
+        // Only skip truly identical points (< 0.1px)
+        if (ddx * ddx + ddy * ddy >= 0.01) {
           currentPoints.current.push(newPt);
         }
       } else {
