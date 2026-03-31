@@ -508,6 +508,32 @@ export const Canvas: React.FC = () => {
     redrawAll();
   }, [state.activeNotebookId, state.activePageIndex, state.notebooks, redrawAll]);
 
+  // ── Native pointer event listeners on overlay canvas ──────────────────────
+  // Consultant recommendation: use native addEventListener (not React synthetic
+  // events) for pointer handling on the overlay canvas. React synthetic events
+  // can interfere with pointer capture lifecycle on iPadOS Safari.
+  // We attach with passive:false so we can call preventDefault if needed.
+  // lostpointercapture fires when capture is released (including our explicit
+  // releasePointerCapture call on ghost ups) — we use it to reset pointer ID
+  // tracking so the next contact is accepted cleanly.
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+
+    const onLostCapture = (e: PointerEvent) => {
+      // Pointer capture was released. If we're still drawing (ghost up scenario),
+      // reset activePointerId so the next pointerDown/Move with any ID is accepted.
+      if (isDrawing.current && e.pointerId === activePointerId.current) {
+        activePointerId.current = null;
+      }
+    };
+
+    overlay.addEventListener('lostpointercapture', onLostCapture);
+    return () => {
+      overlay.removeEventListener('lostpointercapture', onLostCapture);
+    };
+  }, []);
+
   // ─── Coordinate transform ─────────────────────────────────
 
   const screenToCanvas = useCallback((clientX: number, clientY: number): { x: number; y: number } => {
@@ -1289,26 +1315,23 @@ export const Canvas: React.FC = () => {
 
     // Ghost pointerUp detection:
     // iPadOS fires pointerUp with buttons=0 AND pressure=0 when the pen
-    // transitions to hover state (not actually lifted). This is NOT a real
-    // pen lift — it's the OS signaling hover mode. If we commit the stroke
-    // here, no further pointerDown will fire (the OS considers the pen still
-    // "connected") and the next segment is lost.
+    // transitions to hover state (not actually lifted).
     //
-    // Detection: pen pointerUp during active drawing with buttons=0 AND pressure=0
-    // Real lifts have pressure>0 on the last move before up, and buttons may vary.
-    // Ghost ups always have both buttons=0 AND pressure=0 simultaneously.
-    //
-    // Fix: ignore ghost ups — keep isDrawing=true so the stroke continues
-    // when the pen touches down again. The stroke will be committed on the
-    // next real pointerUp (pressure>0 or buttons>0) or pointerCancel.
+    // CRITICAL FIX (consultant-confirmed): We MUST call releasePointerCapture
+    // on ghost ups even though we keep isDrawing=true. If pointer capture
+    // remains active after the ghost up, iPadOS suppresses ALL subsequent
+    // pointer events for that pointer ID — causing complete event blackout.
+    // Releasing capture here allows the OS to resume event delivery.
+    // The next contact will arrive with a new pointer ID (handled by our
+    // ID adoption logic in handlePointerMove).
     if (isDrawing.current &&
         e.pointerType === 'pen' &&
         e.buttons === 0 &&
         e.pressure === 0 &&
         currentPoints.current.length > 0) {
-      // This is a ghost up — pen is hovering, not lifted.
-      // Log it in diagnostics but do NOT commit the stroke.
-      // The stroke remains active and will continue on next pointerDown/Move.
+      // Release capture immediately so OS can resume events
+      try { (e.target as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+      // Keep isDrawing=true — stroke will continue when pen returns
       return;
     }
 
